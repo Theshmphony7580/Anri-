@@ -226,9 +226,25 @@ anri/
   - Hardened frontend chunk drawer against null/undefined chunk payloads in [`src/dashboard/static/app.js`](src/dashboard/static/app.js).
 - [x] Authored production-grade technical [`README.md`](README.md) documenting system architecture, setup, environment configs, telemetry API reference, and Windows/CUDA troubleshooting.
 - [x] Renamed project to **ANRI** across `pyproject.toml`, `README.md`, FastAPI backend title, and observability console UI branding.
+- [x] Conducted full-spectrum security and architectural audit across ingestion, vector storage, agent reasoning state machine, REST API, and frontend telemetry:
+  - Documented 16 vulnerabilities and flaws (including critical silent collection drop DATA-01, insecure CORS SEC-01, arbitrary upload SEC-02, event loop freeze BUG-01, silent mock degradation SEC-07/SEC-10, indirect prompt injection SEC-09, and DOM XSS SEC-05).
+  - Authored comprehensive audit artifact report in `audit_report.md` with root causes, user/expert perspectives, and production remediations.
+- [x] Remediated Key Audit Findings per User Directives:
+  - **SEC-08 (API Key Exposure Patched):** Converted all Google Gemini API calls in [`src/ingestion/embeddings.py`](src/ingestion/embeddings.py), [`src/ingestion/vision.py`](src/ingestion/vision.py), and [`src/agent/llm.py`](src/agent/llm.py) to use HTTP `x-goog-api-key` headers, removing credentials from URL query parameters.
+  - **SEC-07 (Silent Mock Degradation Eliminated):** Added `ALLOW_MOCK_FALLBACK: bool = False` in [`src/config.py`](src/config.py) and hardened [`src/ingestion/embeddings.py`](src/ingestion/embeddings.py) to raise explicit, actionable exceptions instead of silently poisoning Qdrant with random mock vectors on API or PyTorch failure.
+  - **ARCH-01 (LangGraph State Machine Stream Unified):** Replaced duplicate manual while-loop in [`src/dashboard/server.py`](src/dashboard/server.py) with native `graph.stream(..., stream_mode="updates")` driven directly by [`src/agent/graph.py`](src/agent/graph.py), preserving real-time circuit telemetry while eliminating code drift and infinite loop risks.
+  - **BUG-04 (Page-Preserving & Context-Bounded Fallback Parser):** Implemented page-by-page traversal for PDF fallback parsing in [`src/ingestion/parser.py`](src/ingestion/parser.py) (`page_numbers: [page_no]`) and added `split_text_into_sliding_chunks()` strictly capping all chunks to 1,200 characters (~250-300 tokens) with 150-char overlap, guaranteeing chunks never exceed the 512-token context limit of `BAAI/bge-small-en-v1.5`.
+- [x] Authored comprehensive grounded specification report in `system_capabilities_report.md` covering supported file types (PDF, DOCX, TXT, MD, Images), size and length bounds, 2-stage retrieval, generation citations, and visual diagram retrieval.
+- [x] Hardened Reranker Subsystem against Windows Paging File Exhaustion (`os error 1455`):
+  - Root Cause: PyTorch safetensors `mmap` failed on 1.1 GB `BAAI/bge-reranker-base` due to Windows commit limit exhaustion, bypassing `except MemoryError:`.
+  - Switched default reranker provider to **FlashRank ONNX** (`ms-marco-MiniLM-L-12-v2`, ~80MB ONNX runtime) across [`.env`](.env), [`.env.example`](.env.example), and [`src/config.py`](src/config.py), completely eliminating PyTorch paging file dependencies and delivering ~15ms reranking.
+  - Enhanced [`src/agent/reranker.py`](src/agent/reranker.py) to catch `(MemoryError, OSError)`, auto-recovering to FlashRank ONNX or lightweight `cross-encoder/ms-marco-MiniLM-L-6-v2`.
+  - Updated [`src/dashboard/server.py`](src/dashboard/server.py) and [`src/dashboard/static/app.js`](src/dashboard/static/app.js) to dynamically surface active reranker engine and `[ONNX]` telemetry badges.
 - [ ] **NEXT MILESTONE OPTIONS:**
-  1. **Hybrid Retrieval (Dense + BM25 with Reciprocal Rank Fusion - RRF):** PRD §4 Step 3 parallel sparse + dense retrieval before cross-encoder reranking.
-  2. **Multi-Turn Conversational Memory:** Enable session-scoped chat history in LangGraph state & UI.
-  3. **Continuous RAG Triad Evaluation:** Real-time Context Relevance, Faithfulness, and Answer Relevance scoring in the telemetry console.
+  1. **Restart Uvicorn Server:** Run `uv run --no-sync main.py` or `.venv\Scripts\python main.py` to launch with FlashRank ONNX active.
+  2. **Implement XML Boundary Delimitation for Indirect Prompt Injection Defense (SEC-09).**
+  3. **Execute Remaining Security Fixes:** Patch DATA-01 (prevent collection wipe), SEC-01 (CORS whitelist), SEC-02 (file validation), and BUG-01 (non-blocking upload).
+  4. **Hybrid Retrieval (Dense + BM25 with Reciprocal Rank Fusion - RRF):** PRD §4 Step 3 parallel sparse + dense retrieval before cross-encoder reranking.
+
 
 

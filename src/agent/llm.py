@@ -119,8 +119,12 @@ class LLMClient:
         models_to_try = list(dict.fromkeys(m for m in models_to_try if m))
 
         last_err = None
+        headers = {
+            "x-goog-api-key": api_key,
+            "Content-Type": "application/json",
+        }
         for model_name in models_to_try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
 
             payload: Dict[str, Any] = {
                 "contents": [{"parts": [{"text": prompt}]}],
@@ -135,7 +139,7 @@ class LLMClient:
 
             try:
                 with httpx.Client(timeout=45.0) as client:
-                    resp = client.post(url, json=payload)
+                    resp = client.post(url, headers=headers, json=payload)
                     if resp.status_code == 200:
                         data = resp.json()
                         candidates = data.get("candidates", [])

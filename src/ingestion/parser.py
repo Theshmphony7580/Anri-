@@ -3,6 +3,7 @@ import hashlib
 import io
 import os
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional
 
 from schemas import DocumentChunk
@@ -19,6 +20,97 @@ def compute_file_sha256(file_path: str) -> str:
         for chunk in iter(lambda: f.read(65536), b""):
             hasher.update(chunk)
     return hasher.hexdigest()
+
+
+def split_text_into_sliding_chunks(
+    text: str,
+    max_chars: int = 1200,
+    overlap_chars: int = 150,
+) -> List[str]:
+    """Split text into semantically cohesive chunks strictly bounded by max_chars with sliding overlap.
+
+    1,200 characters is ~250-300 tokens, safely within the 512-token context limit
+    of local BGE embeddings (BAAI/bge-small-en-v1.5) and Gemini embeddings.
+    """
+    cleaned = text.strip()
+    if not cleaned:
+        return []
+
+    if len(cleaned) <= max_chars:
+        return [cleaned]
+
+    # Split into paragraphs first
+    paragraphs = [p.strip() for p in cleaned.split("\n\n") if p.strip()]
+    if not paragraphs:
+        paragraphs = [cleaned]
+
+    # Break down any oversized paragraphs into smaller units
+    atomic_units: List[str] = []
+    for para in paragraphs:
+        if len(para) <= max_chars:
+            atomic_units.append(para)
+        else:
+            lines = [line.strip() for line in para.split("\n") if line.strip()]
+            for line in lines:
+                if len(line) <= max_chars:
+                    atomic_units.append(line)
+                else:
+                    sentences = re.split(r"(?<=[.!?])\s+", line)
+                    for sent in sentences:
+                        sent_clean = sent.strip()
+                        if not sent_clean:
+                            continue
+                        if len(sent_clean) <= max_chars:
+                            atomic_units.append(sent_clean)
+                        else:
+                            step = max(100, max_chars - overlap_chars)
+                            for i in range(0, len(sent_clean), step):
+                                piece = sent_clean[i : i + max_chars].strip()
+                                if piece:
+                                    atomic_units.append(piece)
+
+    chunks: List[str] = []
+    current_chunk: List[str] = []
+    current_len = 0
+
+    for unit in atomic_units:
+        unit_len = len(unit)
+        if current_chunk and (current_len + unit_len + 2 > max_chars):
+            combined_text = "\n\n".join(current_chunk).strip()
+            chunks.append(combined_text)
+
+            if overlap_chars > 0 and len(combined_text) > overlap_chars:
+                overlap_text = combined_text[-overlap_chars:].strip()
+                space_idx = overlap_text.find(" ")
+                if space_idx != -1 and space_idx < len(overlap_text) - 1:
+                    overlap_text = overlap_text[space_idx + 1:]
+                current_chunk = [overlap_text, unit] if overlap_text else [unit]
+                current_len = sum(len(u) for u in current_chunk) + 2
+            else:
+                current_chunk = [unit]
+                current_len = unit_len
+        else:
+            current_chunk.append(unit)
+            current_len += unit_len + (2 if current_len > 0 else 0)
+
+    if current_chunk:
+        combined_text = "\n\n".join(current_chunk).strip()
+        if combined_text and (not chunks or chunks[-1] != combined_text):
+            chunks.append(combined_text)
+
+    # Final guarantee: ensure no chunk exceeds max_chars
+    final_chunks: List[str] = []
+    for c in chunks:
+        if len(c) <= max_chars:
+            final_chunks.append(c)
+        else:
+            step = max(100, max_chars - overlap_chars)
+            for i in range(0, len(c), step):
+                piece = c[i : i + max_chars].strip()
+                if piece:
+                    final_chunks.append(piece)
+
+    return final_chunks
 
 
 class DocumentParser:
@@ -77,25 +169,34 @@ class DocumentParser:
 
             parsed_chunks: List[DocumentChunk] = []
 
-            # 1. Text and Table Chunks
-            for idx, c in enumerate(docling_chunks):
-                chunk_id = f"{doc_hash}_{idx:04d}"
-                meta: Dict[str, Any] = {
-                    "doc_hash": doc_hash,
-                    "chunk_id": chunk_id,
-                    "source_file": source_name,
-                    "page_numbers": getattr(c.meta, "page_numbers", [1]) or [1],
-                    "section_path": " > ".join(getattr(c.meta, "headings", [])) or "Main",
-                    "content_type": "table" if getattr(c.meta, "is_table", False) else "text",
-                    "created_at": now_iso,
-                }
-                parsed_chunks.append(
-                    DocumentChunk(
-                        id=chunk_id,
-                        text=c.text,
-                        metadata=meta,
-                    )
+            # 1. Text and Table Chunks (bounded by embedding model context limit)
+            chunk_counter = 0
+            for c in docling_chunks:
+                # If Docling produces an oversized chunk, split it into bounded sliding chunks
+                sub_texts = (
+                    split_text_into_sliding_chunks(c.text, max_chars=1200, overlap_chars=150)
+                    if len(c.text) > 1200
+                    else [c.text]
                 )
+                for sub_text in sub_texts:
+                    chunk_id = f"{doc_hash}_{chunk_counter:04d}"
+                    meta: Dict[str, Any] = {
+                        "doc_hash": doc_hash,
+                        "chunk_id": chunk_id,
+                        "source_file": source_name,
+                        "page_numbers": getattr(c.meta, "page_numbers", [1]) or [1],
+                        "section_path": " > ".join(getattr(c.meta, "headings", [])) or "Main",
+                        "content_type": "table" if getattr(c.meta, "is_table", False) else "text",
+                        "created_at": now_iso,
+                    }
+                    parsed_chunks.append(
+                        DocumentChunk(
+                            id=chunk_id,
+                            text=sub_text,
+                            metadata=meta,
+                        )
+                    )
+                    chunk_counter += 1
 
             # 2. Figure / Diagram Extraction via Gemini Vision (only if enabled)
             if getattr(self.settings, "GENERATE_PICTURE_IMAGES", False) and hasattr(doc, "pictures") and doc.pictures:
@@ -205,40 +306,79 @@ class DocumentParser:
         source_name: str,
         timestamp: str,
     ) -> List[DocumentChunk]:
-        """Robust, low-memory text extraction for plain text, markdown, or PDF documents."""
-        full_text = ""
+        """Robust, layout-aware text extraction for PDF, plain text, and markdown documents."""
         suffix = Path(file_path).suffix.lower()
+        chunks: List[DocumentChunk] = []
+        chunk_idx = 0
 
+        # --- 1. Page-Preserving PDF Traversal ---
         if suffix == ".pdf":
             try:
                 import pypdf
                 reader = pypdf.PdfReader(file_path)
-                pages_text = []
                 for page_idx, page in enumerate(reader.pages):
-                    extracted = page.extract_text() or ""
-                    if extracted.strip():
-                        pages_text.append(f"--- Page {page_idx + 1} ---\n{extracted.strip()}")
-                full_text = "\n\n".join(pages_text)
+                    page_no = page_idx + 1
+                    page_text = page.extract_text() or ""
+                    if not page_text.strip():
+                        continue
+
+                    # Chunk page text strictly bounded by embedding model context limit (max_chars=1200)
+                    page_chunks = split_text_into_sliding_chunks(
+                        page_text, max_chars=1200, overlap_chars=150
+                    )
+                    for text in page_chunks:
+                        chunk_id = f"{doc_hash}_{chunk_idx:04d}"
+                        meta: Dict[str, Any] = {
+                            "doc_hash": doc_hash,
+                            "chunk_id": chunk_id,
+                            "source_file": source_name,
+                            "page_numbers": [page_no],
+                            "section_path": f"Page {page_no}",
+                            "content_type": "text",
+                            "created_at": timestamp,
+                        }
+                        chunks.append(
+                            DocumentChunk(
+                                id=chunk_id,
+                                text=text,
+                                metadata=meta,
+                            )
+                        )
+                        chunk_idx += 1
+
+                if chunks:
+                    print(
+                        f"[DocumentParser] Fallback PDF parser extracted {len(chunks)} chunks "
+                        f"across {len(reader.pages)} pages (all bounded <= 1,200 chars)."
+                    )
+                    return chunks
+
             except Exception as pdf_err:
                 print(f"[DocumentParser] PDF fallback extractor error ({pdf_err}). Reading raw stream.")
 
-        if not full_text:
+        # --- 2. Text / Markdown / Raw Stream Traversal ---
+        try:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 full_text = f.read()
+        except Exception as read_err:
+            print(f"[DocumentParser] Error reading file stream: {read_err}")
+            return []
 
-        paragraphs = [p.strip() for p in full_text.split("\n\n") if p.strip()]
-        if not paragraphs:
-            paragraphs = [full_text.strip()] if full_text.strip() else []
+        text_chunks = split_text_into_sliding_chunks(
+            full_text, max_chars=1200, overlap_chars=150
+        )
+        for text in text_chunks:
+            chunk_id = f"{doc_hash}_{chunk_idx:04d}"
+            # Extract header if present in snippet for section path
+            first_line = text.split("\n", 1)[0].strip()
+            section = first_line[:40] if first_line.startswith("#") else "Document"
 
-        chunks: List[DocumentChunk] = []
-        for idx, text in enumerate(paragraphs):
-            chunk_id = f"{doc_hash}_{idx:04d}"
             meta: Dict[str, Any] = {
                 "doc_hash": doc_hash,
                 "chunk_id": chunk_id,
                 "source_file": source_name,
                 "page_numbers": [1],
-                "section_path": "Document",
+                "section_path": section,
                 "content_type": "text",
                 "created_at": timestamp,
             }
@@ -249,4 +389,10 @@ class DocumentParser:
                     metadata=meta,
                 )
             )
+            chunk_idx += 1
+
+        print(
+            f"[DocumentParser] Fallback text parser extracted {len(chunks)} chunks "
+            f"(all strictly bounded <= 1,200 chars within embedding context limit)."
+        )
         return chunks

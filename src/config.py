@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     GENERATE_PICTURE_IMAGES: bool = False
     CONFIDENCE_THRESHOLD: float = 0.70
     RETRIEVAL_TOP_K: int = 4
+    ALLOW_MOCK_FALLBACK: bool = False
 
     model_config = SettingsConfigDict(
         env_file=(DEFAULT_ENV_FILE, ".env"),

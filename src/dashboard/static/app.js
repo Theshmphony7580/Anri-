@@ -60,8 +60,9 @@ document.addEventListener("DOMContentLoaded", () => {
       const embDevice = (data.embedding_device || "cuda").toUpperCase();
       statEmbedModel.textContent = `${data.embedding_model || "BAAI/bge-small-en-v1.5"} [${embDevice}]`;
       if (statRerankerModel) {
-        const rrDevice = (data.reranker_device || "cuda").toUpperCase();
-        statRerankerModel.textContent = `${data.reranker_model || "bge-reranker-small"} [${rrDevice}]`;
+        const isFlashRank = (data.reranker_provider || "").toLowerCase() === "flashrank";
+        const rrDevice = isFlashRank ? "ONNX" : (data.reranker_device || "cpu").toUpperCase();
+        statRerankerModel.textContent = `${data.reranker_model || "ms-marco-MiniLM-L-12-v2"} [${rrDevice}]`;
       }
       statLlmModel.textContent = `${data.llm_provider.toUpperCase()} (${data.llm_model})`;
 

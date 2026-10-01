@@ -46,12 +46,20 @@ class BGEReranker:
                 return
 
             settings = get_settings()
-            self.provider = getattr(settings, "RERANKER_PROVIDER", "sentence-transformers").lower()
-            self.model_name = model_name or settings.RERANKER_MODEL
-            # Normalize non-existent HuggingFace repo names
-            if "bge-reranker-small" in self.model_name.lower():
-                self.model_name = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-            self.device = device or getattr(settings, "RERANKER_DEVICE", "cpu")
+            self.provider = getattr(settings, "RERANKER_PROVIDER", "flashrank").lower()
+            self.model_name = model_name or getattr(settings, "RERANKER_MODEL", "ms-marco-MiniLM-L-12-v2")
+
+            # Provider-specific model normalization
+            if self.provider == "flashrank":
+                # FlashRank uses ONNX models (default: ms-marco-MiniLM-L-12-v2)
+                if "bge" in self.model_name.lower() or not self.model_name:
+                    self.model_name = "ms-marco-MiniLM-L-12-v2"
+                self.device = "cpu"
+            else:
+                if "bge-reranker-small" in self.model_name.lower():
+                    self.model_name = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+                self.device = device or getattr(settings, "RERANKER_DEVICE", "cpu")
+
             self._model = None
             self._flashrank_model = None
             self._initialized = True
@@ -61,13 +69,17 @@ class BGEReranker:
         if self._model is not None or self._flashrank_model is not None:
             return self._model or self._flashrank_model
 
-        # Provider: FlashRank (ultra-lightweight ONNX runtime)
+        # Provider: FlashRank (ultra-lightweight ONNX runtime, immune to Windows pagefile limit)
         if self.provider == "flashrank":
             try:
                 from flashrank import Ranker
-                print(f"[BGEReranker] Loading FlashRank model '{self.model_name}'...")
-                self._flashrank_model = Ranker(model_name=self.model_name)
-                print(f"[BGEReranker] FlashRank model '{self.model_name}' successfully loaded into memory.")
+                model_name = self.model_name
+                if "bge" in model_name.lower():
+                    model_name = "ms-marco-MiniLM-L-12-v2"
+                    self.model_name = model_name
+                print(f"[BGEReranker] Loading FlashRank ONNX model '{model_name}'...")
+                self._flashrank_model = Ranker(model_name=model_name)
+                print(f"[BGEReranker] FlashRank model '{model_name}' successfully loaded into memory (ONNX).")
                 return self._flashrank_model
             except Exception as e:
                 print(f"[BGEReranker] FlashRank loading failed ({e}). Falling back to sentence-transformers...")
@@ -97,19 +109,29 @@ class BGEReranker:
             except Exception:
                 self._model = CrossEncoder(self.model_name, device=self.device)
             print(f"[BGEReranker] Cross-encoder '{self.model_name}' successfully loaded into memory on {self.device}.")
-        except MemoryError:
-            print(f"[BGEReranker] MemoryError: Insufficient contiguous RAM for '{self.model_name}'.")
-            print("[BGEReranker] Auto-recovering: loading lightweight 'cross-encoder/ms-marco-MiniLM-L-6-v2' (80 MB)...")
+        except (MemoryError, OSError) as mem_err:
+            print(f"[BGEReranker] Memory/OS Error ({mem_err}): Insufficient commit memory/RAM for '{self.model_name}'.")
+            print("[BGEReranker] Auto-recovering: attempting FlashRank ONNX 'ms-marco-MiniLM-L-12-v2' (zero pagefile impact)...")
             try:
-                self.model_name = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+                from flashrank import Ranker
+                self._flashrank_model = Ranker(model_name="ms-marco-MiniLM-L-12-v2")
+                self.provider = "flashrank"
+                self.model_name = "ms-marco-MiniLM-L-12-v2"
+                print(f"[BGEReranker] Successfully recovered with FlashRank '{self.model_name}'.")
+                return self._flashrank_model
+            except Exception as fr_err:
+                print(f"[BGEReranker] FlashRank recovery failed ({fr_err}). Attempting lightweight 'cross-encoder/ms-marco-MiniLM-L-6-v2' (80 MB)...")
                 try:
-                    self._model = CrossEncoder(self.model_name, device=self.device, local_files_only=True)
-                except Exception:
-                    self._model = CrossEncoder(self.model_name, device=self.device)
-                print(f"[BGEReranker] Cross-encoder '{self.model_name}' successfully loaded into memory.")
-            except Exception as fallback_err:
-                print(f"[BGEReranker] Fallback reranker error: {fallback_err}. Falling back to heuristic.")
-                self._model = False
+                    self.model_name = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+                    try:
+                        self._model = CrossEncoder(self.model_name, device=self.device, local_files_only=True)
+                    except Exception:
+                        self._model = CrossEncoder(self.model_name, device=self.device)
+                    print(f"[BGEReranker] Cross-encoder '{self.model_name}' successfully loaded into memory.")
+                    return self._model
+                except Exception as fallback_err:
+                    print(f"[BGEReranker] Fallback reranker error: {fallback_err}. Falling back to heuristic.")
+                    self._model = False
         except ImportError:
             logger.warning("[BGEReranker] 'sentence-transformers' not available. Falling back to heuristic reranking.")
             self._model = False

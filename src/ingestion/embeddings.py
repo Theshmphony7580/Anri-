@@ -78,18 +78,33 @@ class HuggingFaceEmbedder:
                     HuggingFaceEmbedder._shared_device = target_device
                     self.device = target_device
                     print(f"[HuggingFaceEmbedder] Model '{self.model_name}' successfully loaded into memory on {target_device}.")
-                except ImportError:
+                except ImportError as err:
+                    settings = get_settings()
+                    if not settings.ALLOW_MOCK_FALLBACK:
+                        raise RuntimeError(
+                            "[HuggingFaceEmbedder] 'sentence-transformers' is not installed and ALLOW_MOCK_FALLBACK=False."
+                        ) from err
                     logger.warning(
                         "[HuggingFaceEmbedder] 'sentence-transformers' not installed. "
-                        "Falling back to deterministic mock embedding."
+                        "ALLOW_MOCK_FALLBACK=True: Falling back to deterministic mock embedding."
                     )
                     HuggingFaceEmbedder._shared_model = False
+                    HuggingFaceEmbedder._shared_model_name = self.model_name
+                    HuggingFaceEmbedder._shared_device = target_device
                 except Exception as e:
+                    settings = get_settings()
+                    if not settings.ALLOW_MOCK_FALLBACK:
+                        raise RuntimeError(
+                            f"[HuggingFaceEmbedder] Fatal: Failed to load '{self.model_name}' on {target_device}: {e}. "
+                            "ALLOW_MOCK_FALLBACK is False."
+                        ) from e
                     logger.warning(
                         f"[HuggingFaceEmbedder] Failed to load '{self.model_name}' ({e}). "
-                        "Falling back to deterministic mock embedding."
+                        "ALLOW_MOCK_FALLBACK=True: Falling back to deterministic mock embedding."
                     )
                     HuggingFaceEmbedder._shared_model = False
+                    HuggingFaceEmbedder._shared_model_name = self.model_name
+                    HuggingFaceEmbedder._shared_device = target_device
 
             self._model = HuggingFaceEmbedder._shared_model
             return self._model
@@ -112,6 +127,7 @@ class HuggingFaceEmbedder:
         if not texts:
             return []
 
+        settings = get_settings()
         model = self._load_model()
         if model:
             try:
@@ -128,9 +144,16 @@ class HuggingFaceEmbedder:
                 )
                 return [arr.tolist() for arr in embeddings]
             except Exception as e:
-                logger.warning(f"[HuggingFaceEmbedder] Local inference error ({e}). Falling back to mock.")
+                if not settings.ALLOW_MOCK_FALLBACK:
+                    raise RuntimeError(f"[HuggingFaceEmbedder] Batch embedding inference error: {e}") from e
+                logger.warning(f"[HuggingFaceEmbedder] Local inference error ({e}). ALLOW_MOCK_FALLBACK=True: Falling back to mock.")
 
-        # Offline / deterministic fallback when model is not loaded
+        if not settings.ALLOW_MOCK_FALLBACK:
+            raise RuntimeError(
+                f"[HuggingFaceEmbedder] Model '{self.model_name}' is unavailable and ALLOW_MOCK_FALLBACK=False."
+            )
+
+        # Offline / deterministic fallback when mock is explicitly allowed
         return [self._generate_mock_embedding(t) for t in texts]
 
     def _generate_mock_embedding(self, text: str) -> List[float]:
@@ -171,17 +194,33 @@ class GeminiEmbedder:
         if not texts:
             return []
 
-        if self.api_key:
-            try:
-                return self._call_gemini_batch(texts)
-            except Exception as e:
-                logger.warning(f"[GeminiEmbedder] Live API call failed ({e}), falling back to mock.")
+        settings = get_settings()
+        if not self.api_key:
+            if not settings.ALLOW_MOCK_FALLBACK:
+                raise ValueError(
+                    "[GeminiEmbedder] GEMINI_API_KEY is not configured and ALLOW_MOCK_FALLBACK=False. "
+                    "Cannot generate embeddings."
+                )
+            logger.warning("[GeminiEmbedder] No API key; using deterministic mock embeddings (ALLOW_MOCK_FALLBACK=True).")
+            return [self._generate_mock_embedding(t) for t in texts]
+
+        try:
+            return self._call_gemini_batch(texts)
+        except Exception as e:
+            if not settings.ALLOW_MOCK_FALLBACK:
+                raise RuntimeError(f"[GeminiEmbedder] Live API call failed: {e}. ALLOW_MOCK_FALLBACK=False.") from e
+            logger.warning(f"[GeminiEmbedder] Live API call failed ({e}). ALLOW_MOCK_FALLBACK=True: falling back to mock.")
 
         return [self._generate_mock_embedding(t) for t in texts]
 
     def _call_gemini_batch(self, texts: List[str]) -> List[List[float]]:
-        """Call Google Gemini batchEmbedContents endpoint via httpx."""
-        url = f"{self.base_url}/models/{self.model}:batchEmbedContents?key={self.api_key}"
+        """Call Google Gemini batchEmbedContents endpoint via httpx using secure HTTP headers."""
+        url = f"{self.base_url}/models/{self.model}:batchEmbedContents"
+        api_key = (self.api_key or "").strip()
+        headers = {
+            "x-goog-api-key": api_key,
+            "Content-Type": "application/json",
+        }
         requests_payload = [
             {
                 "model": f"models/{self.model}",
@@ -193,7 +232,7 @@ class GeminiEmbedder:
         payload = {"requests": requests_payload}
 
         with httpx.Client(timeout=30.0) as client:
-            response = client.post(url, json=payload)
+            response = client.post(url, headers=headers, json=payload)
             response.raise_for_status()
             data = response.json()
             embeddings_data = data.get("embeddings", [])

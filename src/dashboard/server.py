@@ -35,24 +35,15 @@ from storage.vector_store import QdrantVectorStore, get_vector_store
 from ingestion.embeddings import get_embedder
 from ingestion.parser import compute_file_sha256
 from ingestion.pipeline import IngestionPipeline
-from agent.nodes import (
-    triage_node,
-    direct_generate_node,
-    retrieve_node,
-    rerank_node,
-    grade_node,
-    rewrite_node,
-    generate_node,
-)
 from agent.reranker import get_reranker
-from agent.graph import decide_next_step
+from agent.graph import get_rag_graph, decide_next_step
 from agent.state import RAGState
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Eagerly load and warm up vector store, embedding model, and cross-encoder reranker at startup."""
-    print("\n[Server Lifespan] Preloading and warming up local ML models into RAM...")
+    """Eagerly load and warm up vector store, embedding model, reranker, and LangGraph workflow at startup."""
+    print("\n[Server Lifespan] Preloading and warming up local ML models and LangGraph state machine into RAM...")
     
     # 1. Thread-safe Qdrant vector store
     get_vector_store()
@@ -69,7 +60,10 @@ async def lifespan(app: FastAPI):
         if hasattr(reranker, "warmup"):
             reranker.warmup()
 
-    print("[Server Lifespan] All models preloaded into RAM. Zero query-time model loading latency!\n")
+    # 4. Compiled LangGraph StateMachine
+    get_rag_graph()
+
+    print("[Server Lifespan] All models and LangGraph state machine preloaded into RAM. Zero query-time loading latency!\n")
     yield
 
 
@@ -130,8 +124,9 @@ def get_system_stats() -> Dict[str, Any]:
         "embedding_model": settings.LOCAL_EMBEDDING_MODEL,
         "embedding_device": settings.EMBEDDING_DEVICE,
         "use_reranker": getattr(settings, "USE_RERANKER", True),
-        "reranker_model": getattr(settings, "RERANKER_MODEL", "BAAI/bge-reranker-base"),
-        "reranker_device": getattr(settings, "RERANKER_DEVICE", "cuda"),
+        "reranker_model": getattr(get_reranker(), "model_name", getattr(settings, "RERANKER_MODEL", "ms-marco-MiniLM-L-12-v2")),
+        "reranker_device": getattr(get_reranker(), "device", getattr(settings, "RERANKER_DEVICE", "cpu")),
+        "reranker_provider": getattr(get_reranker(), "provider", getattr(settings, "RERANKER_PROVIDER", "flashrank")),
         "rerank_candidates_k": getattr(settings, "RERANK_CANDIDATES_K", 15),
         "llm_provider": settings.LLM_PROVIDER,
         "llm_model": settings.GROQ_MODEL if settings.LLM_PROVIDER == "groq" else settings.GEMINI_MODEL,
@@ -250,7 +245,8 @@ def execute_query_trace(payload: QueryPayload) -> Dict[str, Any]:
     settings = get_settings()
     start_time = time.time()
 
-    state: RAGState = {
+    graph = get_rag_graph()
+    initial_state: RAGState = {
         "question": payload.question,
         "chat_history": [],
         "retrieved_chunks": [],
@@ -261,154 +257,83 @@ def execute_query_trace(payload: QueryPayload) -> Dict[str, Any]:
         "retry_count": 0,
     }
 
+    state = dict(initial_state)
     steps_trace: List[Dict[str, Any]] = []
+    step_start = time.time()
 
-    # Step 0: Intent Classification / Triage
-    t0 = time.time()
-    triage_out = triage_node(state)
-    state.update(triage_out)
-    intent = state.get("intent", "retrieval")
-    steps_trace.append({
-        "node": "triage",
-        "attempt": 0,
-        "status": "pass",
-        "intent": intent,
-        "duration_ms": round((time.time() - t0) * 1000, 1),
-        "details": f"Classified query intent as '{intent}'",
-    })
+    # Stream through real LangGraph state machine execution transitions
+    for step_output in graph.stream(initial_state, stream_mode="updates"):
+        for node_name, node_update in step_output.items():
+            duration_ms = round((time.time() - step_start) * 1000, 1)
+            step_start = time.time()
+            state.update(node_update)
 
-    # Direct conversational route (bypasses Qdrant vector retrieval)
-    if intent == "direct":
-        t0 = time.time()
-        gen_out = direct_generate_node(state)
-        state.update(gen_out)
-        final_answer = state.get("answer", "")
-        gen_duration = round((time.time() - t0) * 1000, 1)
-
-        steps_trace.append({
-            "node": "direct_generate",
-            "status": "pass",
-            "duration_ms": gen_duration,
-            "details": "Synthesized direct conversational response without document retrieval",
-        })
-
-        total_latency_ms = round((time.time() - start_time) * 1000, 1)
-
-        return {
-            "question": payload.question,
-            "final_answer": final_answer,
-            "confidence_score": 1.0,
-            "threshold": settings.CONFIDENCE_THRESHOLD,
-            "passed": True,
-            "retries_count": 0,
-            "total_latency_ms": total_latency_ms,
-            "steps_trace": steps_trace,
-            "retrieved_chunks": [],
-        }
-
-
-    # Step 1: Initial Retrieval (Broad candidate pool)
-    t0 = time.time()
-    ret_out = retrieve_node(state)
-    state.update(ret_out)
-    raw_candidates = state.get("retrieved_chunks", [])
-    steps_trace.append({
-        "node": "retrieve",
-        "attempt": 0,
-        "status": "pass" if raw_candidates else "empty",
-        "duration_ms": round((time.time() - t0) * 1000, 1),
-        "details": f"Retrieved {len(raw_candidates)} candidate chunks from Qdrant",
-    })
-
-    # Step 1.5: Cross-Encoder Reranking
-    if getattr(settings, "USE_RERANKER", True):
-        t0 = time.time()
-        rerank_out = rerank_node(state)
-        state.update(rerank_out)
-        reranked_chunks = state.get("retrieved_chunks", [])
-        top_score = (reranked_chunks[0].metadata or {}).get("rerank_score", None) if reranked_chunks else None
-        steps_trace.append({
-            "node": "rerank",
-            "attempt": 0,
-            "status": "pass" if reranked_chunks else "empty",
-            "duration_ms": round((time.time() - t0) * 1000, 1),
-            "details": f"Rescored {len(raw_candidates)} candidates -> Top {len(reranked_chunks)} (Top score: {top_score})",
-        })
-
-    # Reasoning Loop with dynamic grading & rewriting
-    while True:
-        # Step 2: Grade relevance
-        t0 = time.time()
-        grade_out = grade_node(state)
-        state.update(grade_out)
-        confidence = state.get("confidence_score", 0.0)
-        grade_duration = round((time.time() - t0) * 1000, 1)
-
-        decision = decide_next_step(state)
-        steps_trace.append({
-            "node": "grade",
-            "attempt": state.get("retry_count", 0),
-            "status": "pass" if confidence >= settings.CONFIDENCE_THRESHOLD else "warn",
-            "score": round(confidence, 2),
-            "threshold": settings.CONFIDENCE_THRESHOLD,
-            "duration_ms": grade_duration,
-            "decision": decision,
-        })
-
-        if decision == "generate":
-            break
-
-        # Step 3: Rewrite query
-        t0 = time.time()
-        rewrite_out = rewrite_node(state)
-        state.update(rewrite_out)
-        rewrite_duration = round((time.time() - t0) * 1000, 1)
-        steps_trace.append({
-            "node": "rewrite",
-            "attempt": state.get("retry_count", 0),
-            "status": "warn",
-            "rewritten_query": state.get("rewritten_question"),
-            "duration_ms": rewrite_duration,
-        })
-
-        # Loop back into retrieve & rerank
-        t0 = time.time()
-        ret_out = retrieve_node(state)
-        state.update(ret_out)
-        raw_candidates = state.get("retrieved_chunks", [])
-        steps_trace.append({
-            "node": "retrieve",
-            "attempt": state.get("retry_count", 0),
-            "status": "pass" if raw_candidates else "empty",
-            "duration_ms": round((time.time() - t0) * 1000, 1),
-            "details": f"Re-retrieved {len(raw_candidates)} candidate chunks",
-        })
-
-        if getattr(settings, "USE_RERANKER", True):
-            t0 = time.time()
-            rerank_out = rerank_node(state)
-            state.update(rerank_out)
-            reranked_chunks = state.get("retrieved_chunks", [])
-            steps_trace.append({
-                "node": "rerank",
-                "attempt": state.get("retry_count", 0),
-                "status": "pass" if reranked_chunks else "empty",
-                "duration_ms": round((time.time() - t0) * 1000, 1),
-                "details": f"Re-reranked to {len(reranked_chunks)} chunks",
-            })
-
-    # Step 4: Final Generation
-    t0 = time.time()
-    gen_out = generate_node(state)
-    state.update(gen_out)
-    final_answer = state.get("answer", "")
-    gen_duration = round((time.time() - t0) * 1000, 1)
-
-    steps_trace.append({
-        "node": "generate",
-        "status": "pass" if state.get("confidence_score", 0.0) >= settings.CONFIDENCE_THRESHOLD else "refuse",
-        "duration_ms": gen_duration,
-    })
+            if node_name == "triage":
+                intent = state.get("intent", "retrieval")
+                steps_trace.append({
+                    "node": "triage",
+                    "attempt": 0,
+                    "status": "pass",
+                    "intent": intent,
+                    "duration_ms": duration_ms,
+                    "details": f"Classified query intent as '{intent}'",
+                })
+            elif node_name == "direct_generate":
+                steps_trace.append({
+                    "node": "direct_generate",
+                    "status": "pass",
+                    "duration_ms": duration_ms,
+                    "details": "Synthesized direct conversational response without document retrieval",
+                })
+            elif node_name == "retrieve":
+                chunks = state.get("retrieved_chunks", [])
+                retry_c = state.get("retry_count", 0)
+                prefix = "Re-retrieved" if retry_c > 0 else "Retrieved"
+                steps_trace.append({
+                    "node": "retrieve",
+                    "attempt": retry_c,
+                    "status": "pass" if chunks else "empty",
+                    "duration_ms": duration_ms,
+                    "details": f"{prefix} {len(chunks)} candidate chunks from Qdrant",
+                })
+            elif node_name == "rerank":
+                chunks = state.get("retrieved_chunks", [])
+                retry_c = state.get("retry_count", 0)
+                top_score = (chunks[0].metadata or {}).get("rerank_score", None) if chunks else None
+                steps_trace.append({
+                    "node": "rerank",
+                    "attempt": retry_c,
+                    "status": "pass" if chunks else "empty",
+                    "duration_ms": duration_ms,
+                    "details": f"Rescored -> Top {len(chunks)} (Top score: {top_score})",
+                })
+            elif node_name == "grade":
+                confidence = state.get("confidence_score", 0.0)
+                decision = decide_next_step(state)
+                steps_trace.append({
+                    "node": "grade",
+                    "attempt": state.get("retry_count", 0),
+                    "status": "pass" if confidence >= settings.CONFIDENCE_THRESHOLD else "warn",
+                    "score": round(confidence, 2),
+                    "threshold": settings.CONFIDENCE_THRESHOLD,
+                    "duration_ms": duration_ms,
+                    "decision": decision,
+                })
+            elif node_name == "rewrite":
+                steps_trace.append({
+                    "node": "rewrite",
+                    "attempt": state.get("retry_count", 0),
+                    "status": "warn",
+                    "rewritten_query": state.get("rewritten_question"),
+                    "duration_ms": duration_ms,
+                })
+            elif node_name == "generate":
+                confidence = state.get("confidence_score", 0.0)
+                steps_trace.append({
+                    "node": "generate",
+                    "status": "pass" if confidence >= settings.CONFIDENCE_THRESHOLD else "refuse",
+                    "duration_ms": duration_ms,
+                })
 
     total_latency_ms = round((time.time() - start_time) * 1000, 1)
 
@@ -427,12 +352,16 @@ def execute_query_trace(payload: QueryPayload) -> Dict[str, Any]:
             "content_type": meta.get("content_type", "text"),
         })
 
+    is_direct = state.get("intent") == "direct"
+    final_confidence = 1.0 if is_direct else round(state.get("confidence_score", 0.0), 2)
+    is_passed = True if is_direct else (state.get("confidence_score", 0.0) >= settings.CONFIDENCE_THRESHOLD)
+
     return {
         "question": payload.question,
-        "final_answer": final_answer,
-        "confidence_score": round(state.get("confidence_score", 0.0), 2),
+        "final_answer": state.get("answer", ""),
+        "confidence_score": final_confidence,
         "threshold": settings.CONFIDENCE_THRESHOLD,
-        "passed": state.get("confidence_score", 0.0) >= settings.CONFIDENCE_THRESHOLD,
+        "passed": is_passed,
         "retries_count": state.get("retry_count", 0),
         "total_latency_ms": total_latency_ms,
         "steps_trace": steps_trace,

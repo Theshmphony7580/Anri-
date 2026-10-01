@@ -6,7 +6,7 @@ Assembles the 4-node reasoning loop:
 """
 
 import logging
-from typing import Literal
+from typing import Literal, Optional
 
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -109,9 +109,20 @@ def build_rag_graph() -> CompiledStateGraph:
     return workflow.compile()
 
 
+_CACHED_RAG_GRAPH: Optional[CompiledStateGraph] = None
+
+
+def get_rag_graph() -> CompiledStateGraph:
+    """Return a process-wide cached instance of the compiled LangGraph workflow."""
+    global _CACHED_RAG_GRAPH
+    if _CACHED_RAG_GRAPH is None:
+        _CACHED_RAG_GRAPH = build_rag_graph()
+    return _CACHED_RAG_GRAPH
+
+
 def run_rag_query(question: str) -> QueryResponse:
     """Convenience helper to run an end-to-end query through the compiled graph and format as QueryResponse."""
-    graph = build_rag_graph()
+    graph = get_rag_graph()
     initial_state: RAGState = {
         "question": question,
         "chat_history": [],

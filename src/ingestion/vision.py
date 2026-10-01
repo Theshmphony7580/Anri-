@@ -74,7 +74,12 @@ class VLMVisionCaptioner:
         effective_prompt = prompt if prompt is not None else self.prompt
         b64_image = base64.b64encode(image_bytes).decode("utf-8")
 
-        url = f"{self.base_url}/models/{self.model}:generateContent?key={self.api_key}"
+        url = f"{self.base_url}/models/{self.model}:generateContent"
+        api_key = (self.api_key or "").strip()
+        headers = {
+            "x-goog-api-key": api_key,
+            "Content-Type": "application/json",
+        }
         payload = {
             "contents": [
                 {
@@ -97,7 +102,7 @@ class VLMVisionCaptioner:
 
         try:
             with httpx.Client(timeout=45.0) as client:
-                response = client.post(url, json=payload)
+                response = client.post(url, headers=headers, json=payload)
                 response.raise_for_status()
                 data = response.json()
 
