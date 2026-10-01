@@ -71,9 +71,8 @@ class QdrantVectorStore:
     ) -> None:
         """Create Qdrant collection and payload indexes if they do not already exist.
         
-        Automatically detects if an existing on-disk collection has a mismatched
-        vector dimension (e.g. legacy 768-dim vs current 384-dim) and recreates it
-        to prevent numpy broadcasting errors.
+        Detects an existing collection with a mismatched vector dimension and
+        raises an actionable error without deleting indexed data.
         """
         target_collection = collection_name or self.collection_name
         target_dim = vector_dim or self.vector_dim
@@ -87,26 +86,15 @@ class QdrantVectorStore:
                     existing_dim = getattr(next(iter(vectors_cfg.values())), "size", None)
 
                 if existing_dim is not None and existing_dim != target_dim:
-                    print(
-                        f"[QdrantVectorStore] Dimension mismatch detected in '{target_collection}': "
-                        f"collection on disk has size={existing_dim}, but active embedder requires size={target_dim}. "
-                        f"Recreating collection to match {target_dim} dimensions..."
+                    raise ValueError(
+                        f"Vector dimension mismatch for Qdrant collection '{target_collection}': "
+                        f"the existing collection uses {existing_dim} dimensions, but the configured "
+                        f"embedding model uses {target_dim}. Existing vectors were preserved. Restore "
+                        f"the previous embedding configuration, or re-embed the source documents into "
+                        f"a new collection before switching models."
                     )
-                    self.client.delete_collection(collection_name=target_collection)
-                    self.client.create_collection(
-                        collection_name=target_collection,
-                        vectors_config=models.VectorParams(
-                            size=target_dim,
-                            distance=models.Distance.COSINE,
-                        ),
-                    )
-                    if self.is_remote:
-                        self.client.create_payload_index(
-                            collection_name=target_collection,
-                            field_name="doc_hash",
-                            field_schema=models.PayloadSchemaType.KEYWORD,
-                        )
-                    return
+            except ValueError:
+                raise
             except Exception as e:
                 logger.warning(f"[QdrantVectorStore] Could not inspect collection '{target_collection}': {e}")
 
