@@ -58,10 +58,8 @@ class IngestionPipeline:
                 message=f"Document already indexed with hash {doc_hash[:10]}... Skipping.",
             )
 
-        # If re-indexing is forced, purge old vectors first
         if force_reindex:
-            print(f"[IngestionPipeline] Force re-index enabled. Purging existing vectors for {doc_hash[:10]}...")
-            self.vector_store.delete_by_doc_hash(doc_hash)
+            print(f"[IngestionPipeline] Force re-index enabled. Existing vectors will be replaced after the new content is indexed.")
 
         # Step 2: Parse and chunk with metadata
         print("[IngestionPipeline] [1/3] Parsing document & extracting hierarchical chunks...")
@@ -89,6 +87,11 @@ class IngestionPipeline:
         print(f"[IngestionPipeline] [3/3] Upserting vectors into Qdrant collection '{self.vector_store.collection_name}'...")
         t_upsert = time.time()
         self.vector_store.upsert_chunks(chunks=chunks, vectors=vectors)
+        if force_reindex:
+            self.vector_store.delete_by_doc_hash(
+                doc_hash,
+                exclude_chunk_ids=[c.metadata.get("chunk_id", c.id) for c in chunks],
+            )
         print(f"[IngestionPipeline] [3/3] Qdrant upsert complete in {time.time() - t_upsert:.2f}s.")
 
         total_elapsed = time.time() - t0
