@@ -633,6 +633,10 @@ body {
   min-height: 100px;
 }
 
+.output-body.is-streaming {
+  white-space: pre-wrap;
+}
+
 .output-body p {
   margin-bottom: 10px;
 }

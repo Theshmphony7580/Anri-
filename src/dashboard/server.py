@@ -8,6 +8,7 @@ Provides high-density REST endpoints for:
 """
 
 import os
+import json
 
 # Prevent OpenBLAS thread allocation crash on Windows
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -27,6 +28,7 @@ if str(_SRC_DIR) not in sys.path:
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -236,18 +238,16 @@ async def upload_document(file: UploadFile = File(...), auto_ingest: bool = True
     }
 
 
-@app.post("/api/query")
-def execute_query_trace(payload: QueryPayload) -> Dict[str, Any]:
+def _iter_query_events(question: str, stream_answer: bool):
     """
-    Execute query through the LangGraph state machine, tracking discrete node transitions
-    and returning execution telemetry for the frontend circuit visualizer.
+    Execute the graph and emit answer token events followed by the completed query trace.
     """
     settings = get_settings()
     start_time = time.time()
 
     graph = get_rag_graph()
     initial_state: RAGState = {
-        "question": payload.question,
+        "question": question,
         "chat_history": [],
         "retrieved_chunks": [],
         "confidence_score": 0.0,
@@ -255,6 +255,7 @@ def execute_query_trace(payload: QueryPayload) -> Dict[str, Any]:
         "intent": None,
         "answer": "",
         "retry_count": 0,
+        "stream_answer": stream_answer,
     }
 
     state = dict(initial_state)
@@ -262,7 +263,15 @@ def execute_query_trace(payload: QueryPayload) -> Dict[str, Any]:
     step_start = time.time()
 
     # Stream through real LangGraph state machine execution transitions
-    for step_output in graph.stream(initial_state, stream_mode="updates"):
+    for mode, step_output in graph.stream(
+        initial_state,
+        stream_mode=["updates", "custom"],
+    ):
+        if mode == "custom":
+            if stream_answer and step_output.get("type") == "answer_token":
+                yield {"event": "token", "token": step_output.get("token", "")}
+            continue
+
         for node_name, node_update in step_output.items():
             duration_ms = round((time.time() - step_start) * 1000, 1)
             step_start = time.time()
@@ -356,8 +365,8 @@ def execute_query_trace(payload: QueryPayload) -> Dict[str, Any]:
     final_confidence = 1.0 if is_direct else round(state.get("confidence_score", 0.0), 2)
     is_passed = True if is_direct else (state.get("confidence_score", 0.0) >= settings.CONFIDENCE_THRESHOLD)
 
-    return {
-        "question": payload.question,
+    response = {
+        "question": question,
         "final_answer": state.get("answer", ""),
         "confidence_score": final_confidence,
         "threshold": settings.CONFIDENCE_THRESHOLD,
@@ -367,6 +376,36 @@ def execute_query_trace(payload: QueryPayload) -> Dict[str, Any]:
         "steps_trace": steps_trace,
         "retrieved_chunks": formatted_chunks,
     }
+
+    yield {"event": "complete", "trace": response}
+
+
+def _collect_query_trace(question: str) -> Dict[str, Any]:
+    for event in _iter_query_events(question, stream_answer=False):
+        if event["event"] == "complete":
+            return event["trace"]
+    raise RuntimeError("Query completed without a final trace.")
+
+
+@app.post("/api/query")
+def execute_query_trace(payload: QueryPayload) -> Dict[str, Any]:
+    return _collect_query_trace(payload.question)
+
+
+@app.post("/api/query/stream")
+def execute_query_trace_stream(payload: QueryPayload) -> StreamingResponse:
+    def event_stream():
+        try:
+            for event in _iter_query_events(payload.question, stream_answer=True):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception:
+            yield f"data: {json.dumps({'event': 'error', 'detail': 'Query execution failed.'})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # Mount static assets directory

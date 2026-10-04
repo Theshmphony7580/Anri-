@@ -16,4 +16,5 @@ class RAGState(TypedDict, total=False):
     intent: Optional[str]
     answer: str
     retry_count: int
+    stream_answer: bool
 

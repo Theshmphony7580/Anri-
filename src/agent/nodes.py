@@ -11,6 +11,7 @@ import json
 import logging
 import re
 from typing import Any, Dict, Optional
+from langgraph.config import get_stream_writer
 
 from schemas import DocumentChunk
 from config import get_settings
@@ -206,6 +207,31 @@ def rewrite_node(
     }
 
 
+def _generate_answer(
+    client: LLMClient,
+    prompt: str,
+    system_prompt: str,
+    stream_answer: bool,
+) -> str:
+    if not stream_answer:
+        return client.generate(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            json_mode=False,
+        )
+
+    writer = get_stream_writer()
+    tokens = []
+    for token in client.stream(
+        prompt=prompt,
+        system_prompt=system_prompt,
+        json_mode=False,
+    ):
+        tokens.append(token)
+        writer({"type": "answer_token", "token": token})
+    return "".join(tokens)
+
+
 def generate_node(
     state: RAGState,
     llm: Optional[LLMClient] = None,
@@ -232,10 +258,11 @@ def generate_node(
     client = llm or LLMClient()
 
     prompt = GENERATE_USER_TEMPLATE.format(question=question, context=context_str)
-    answer = client.generate(
+    answer = _generate_answer(
+        client=client,
         prompt=prompt,
         system_prompt=GENERATE_SYSTEM_PROMPT,
-        json_mode=False,
+        stream_answer=state.get("stream_answer", False),
     )
 
     return {"answer": answer}
@@ -250,10 +277,11 @@ def direct_generate_node(
     client = llm or LLMClient()
 
     prompt = DIRECT_GENERATE_USER_TEMPLATE.format(question=question)
-    answer = client.generate(
+    answer = _generate_answer(
+        client=client,
         prompt=prompt,
         system_prompt=DIRECT_GENERATE_SYSTEM_PROMPT,
-        json_mode=False,
+        stream_answer=state.get("stream_answer", False),
     )
 
     logger.info("[direct_generate_node] Generated direct response (skipping vector retrieval).")

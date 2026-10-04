@@ -9,7 +9,7 @@ Features:
 import json
 import logging
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 
 import httpx
 
@@ -65,6 +65,135 @@ class LLMClient:
 
         # Offline deterministic mock fallback
         return self._generate_mock(prompt, system_prompt, json_mode)
+
+    def stream(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        json_mode: bool = False,
+        temperature: Optional[float] = None,
+    ) -> Iterator[str]:
+        """Yield generated text incrementally from the configured provider."""
+        temp = self.default_temp if temperature is None else temperature
+        emitted = False
+
+        if self.provider == "groq" and self.groq_api_key:
+            try:
+                for token in self._stream_groq(prompt, system_prompt, json_mode, temp):
+                    emitted = True
+                    yield token
+                return
+            except Exception as e:
+                if emitted:
+                    raise
+                logger.warning(f"[LLMClient] Groq stream failed ({e}). Using offline mock fallback.")
+
+        if self.provider == "gemini" and self.gemini_api_key:
+            try:
+                for token in self._stream_gemini(prompt, system_prompt, json_mode, temp):
+                    emitted = True
+                    yield token
+                return
+            except Exception as e:
+                if emitted:
+                    raise
+                logger.warning(f"[LLMClient] Gemini stream failed ({e}). Using offline mock fallback.")
+
+        mock_text = self._generate_mock(prompt, system_prompt, json_mode)
+        yield from re.findall(r"\S+\s*", mock_text)
+
+    def _stream_groq(
+        self,
+        prompt: str,
+        system_prompt: Optional[str],
+        json_mode: bool,
+        temperature: float,
+    ) -> Iterator[str]:
+        """Stream content deltas from the Groq OpenAI-compatible endpoint."""
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        payload: Dict[str, Any] = {
+            "model": self.groq_model or "qwen/qwen3.8-27b",
+            "messages": messages,
+            "temperature": temperature,
+            "stream": True,
+        }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+
+        headers = {
+            "Authorization": f"Bearer {(self.groq_api_key or '').strip()}",
+            "Content-Type": "application/json",
+        }
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        with httpx.Client(timeout=45.0) as client:
+            with client.stream("POST", url, headers=headers, json=payload) as response:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    if not data:
+                        continue
+                    chunk = json.loads(data)
+                    choices = chunk.get("choices", [])
+                    if choices:
+                        token = choices[0].get("delta", {}).get("content") or ""
+                        if token:
+                            yield token
+
+    def _stream_gemini(
+        self,
+        prompt: str,
+        system_prompt: Optional[str],
+        json_mode: bool,
+        temperature: float,
+    ) -> Iterator[str]:
+        """Stream text parts from the Gemini SSE generation endpoint."""
+        models_to_try = [self.gemini_model, "gemini-3.6-flash", "gemini-flash-latest", "gemini-1.5-flash"]
+        models_to_try = list(dict.fromkeys(model for model in models_to_try if model))
+        payload: Dict[str, Any] = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": temperature},
+        }
+        if system_prompt:
+            payload["system_instruction"] = {"parts": [{"text": system_prompt}]}
+        if json_mode:
+            payload["generationConfig"]["responseMimeType"] = "application/json"
+
+        headers = {
+            "x-goog-api-key": (self.gemini_api_key or "").strip(),
+            "Content-Type": "application/json",
+        }
+        with httpx.Client(timeout=45.0) as client:
+            for model_name in models_to_try:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:streamGenerateContent?alt=sse"
+                with client.stream("POST", url, headers=headers, json=payload) as response:
+                    if response.status_code == 404:
+                        continue
+                    response.raise_for_status()
+                    for line in response.iter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if not data:
+                            continue
+                        chunk = json.loads(data)
+                        candidates = chunk.get("candidates", [])
+                        if candidates:
+                            parts = candidates[0].get("content", {}).get("parts", [])
+                            for part in parts:
+                                token = part.get("text", "")
+                                if token:
+                                    yield token
+                    return
+
+        raise RuntimeError("All Gemini streaming model attempts failed.")
 
     def _call_groq(
         self,

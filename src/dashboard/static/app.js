@@ -239,21 +239,53 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     try {
-      const res = await fetch("/api/query", {
+      const res = await fetch("/api/query/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question })
       });
-
-      clearInterval(timerInterval);
 
       if (!res.ok) {
         const errData = await res.json();
         throw new Error(errData.detail || "Query execution failed.");
       }
 
-      const trace = await res.json();
-      renderExecutionTrace(trace);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let streamedAnswer = "";
+      let completed = false;
+
+      while (true) {
+        const { value, done } = await reader.read();
+        buffer += decoder.decode(value, { stream: !done });
+
+        let boundary = buffer.indexOf("\n\n");
+        while (boundary !== -1) {
+          const block = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          const dataLine = block.split("\n").find(line => line.startsWith("data:"));
+          if (dataLine) {
+            const event = JSON.parse(dataLine.slice(5).trim());
+            if (event.event === "token") {
+              streamedAnswer += event.token;
+              renderStreamingAnswer(streamedAnswer);
+              await new Promise(resolve => requestAnimationFrame(resolve));
+            } else if (event.event === "complete") {
+              renderExecutionTrace(event.trace);
+              completed = true;
+            } else if (event.event === "error") {
+              throw new Error(event.detail || "Query execution failed.");
+            }
+          }
+          boundary = buffer.indexOf("\n\n");
+        }
+
+        if (done) break;
+      }
+
+      clearInterval(timerInterval);
+      if (!completed) throw new Error("Query stream ended before completion.");
 
     } catch (err) {
       clearInterval(timerInterval);
@@ -277,6 +309,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     gaugeFill.style.width = "0%";
     confidenceReadout.textContent = `0.00 / ${systemThreshold.toFixed(2)} [IN-FLIGHT]`;
+    outputBody.classList.remove("is-streaming");
     outputBody.innerHTML = `<p class="mono text-muted">Executing LangGraph reasoning loops...</p>`;
     outputLatency.textContent = "-- ms";
     chunksList.innerHTML = `<div class="chunk-empty mono">Fetching chunks...</div>`;
@@ -361,7 +394,13 @@ document.addEventListener("DOMContentLoaded", () => {
     renderChunks(trace.retrieved_chunks);
   }
 
+  function renderStreamingAnswer(answer) {
+    outputBody.classList.add("is-streaming");
+    outputBody.textContent = answer;
+  }
+
   function renderAnswerText(answer) {
+    outputBody.classList.remove("is-streaming");
     if (!answer) {
       outputBody.innerHTML = `<p class="mono text-muted">No response generated.</p>`;
       return;

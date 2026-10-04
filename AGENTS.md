@@ -240,6 +240,8 @@ anri/
   - Switched default reranker provider to **FlashRank ONNX** (`ms-marco-MiniLM-L-12-v2`, ~80MB ONNX runtime) across [`.env`](.env), [`.env.example`](.env.example), and [`src/config.py`](src/config.py), completely eliminating PyTorch paging file dependencies and delivering ~15ms reranking.
   - Enhanced [`src/agent/reranker.py`](src/agent/reranker.py) to catch `(MemoryError, OSError)`, auto-recovering to FlashRank ONNX or lightweight `cross-encoder/ms-marco-MiniLM-L-6-v2`.
   - Updated [`src/dashboard/server.py`](src/dashboard/server.py) and [`src/dashboard/static/app.js`](src/dashboard/static/app.js) to dynamically surface active reranker engine and `[ONNX]` telemetry badges.
+- [x] Added end-to-end dashboard answer token streaming: Groq/Gemini streaming responses feed LangGraph custom events, the new `/api/query/stream` SSE route forwards tokens, and the dashboard renders answer text incrementally before applying citation formatting at completion. Existing `/api/query` JSON behavior remains unchanged.
+- [x] Verified dashboard token events in the browser (143 incremental answer updates) and paced rendering at one animation frame per event so rapid provider bursts remain visibly progressive.
 - [ ] **NEXT MILESTONE OPTIONS:**
   1. **Restart Uvicorn Server:** Run `uv run --no-sync main.py` or `.venv\Scripts\python main.py` to launch with FlashRank ONNX active.
   2. **Implement XML Boundary Delimitation for Indirect Prompt Injection Defense (SEC-09).**
