@@ -36,6 +36,8 @@ Equipped with an industrial **Precision Observability Console** providing real-t
 
 ## System Architecture
 
+> **Target architecture:** ANRI's knowledge domain is determined by the supported documents currently ingested and indexed. It is not tied to a single subject; ingesting a different document corpus changes the material ANRI can retrieve and use to answer questions. The diagrams below show the planned Qdrant Cloud hybrid retrieval design.
+
 ### 1. Agent Reasoning Loop (LangGraph State Machine)
 
 ```mermaid
@@ -44,8 +46,9 @@ flowchart TD
     Triage -->|intent == 'direct'| DirectGen[Direct Conversational Generator]
     DirectGen --> Output([Final Answer])
 
-    Triage -->|intent == 'retrieval'| Retrieve[01 // Retrieve Node<br/>Qdrant Dense Search K=15]
-    Retrieve --> Rerank[01.5 // Rerank Node<br/>Cross-Encoder Rescoring Top-4]
+    Triage -->|intent == 'retrieval'| Retrieve[01 // Retrieve Node<br/>Qdrant Cloud Dense + Sparse Search]
+    Retrieve --> Fuse[Rank Fusion<br/>Reciprocal Rank Fusion]
+    Fuse --> Rerank[01.5 // Rerank Node<br/>Cross-Encoder Rescoring Top-4]
     Rerank --> Grade[02 // Grade Node<br/>Context Relevance Evaluation]
 
     Grade -->|Score >= 0.70 or Max Retries| Generate[04 // Generate Node<br/>Synthesize Grounded Answer]
@@ -57,9 +60,11 @@ flowchart TD
 
 ### 2. Document Ingestion Pipeline
 
+Each ingested corpus defines the subject matter available to ANRI. Ingestion uses the formats and document structures supported by the configured parsers.
+
 ```mermaid
 flowchart LR
-    Upload[Document Upload] --> Hash[SHA-256 Hash Check]
+    Upload[Supported Document Upload] --> Hash[SHA-256 Hash Check]
     Hash -->|Hash Exists| Skip[Skip / Return Existing Doc ID]
     Hash -->|New Document| Docling[IBM Docling Parser<br/>do_ocr=False]
 
@@ -70,8 +75,10 @@ flowchart LR
     TextElem --> MetaInject[Metadata Injector<br/>doc_hash, section_path, page_num]
     VLM --> MetaInject
 
-    MetaInject --> Embed[Dense Embedder<br/>bge-small-en-v1.5 384-dim]
-    Embed --> Qdrant[(Qdrant Vector DB<br/>Local Disk Storage)]
+    MetaInject --> Dense[Dense Embedding<br/>Semantic representation]
+    MetaInject --> Sparse[Sparse BM25 Representation<br/>Keyword matching]
+    Dense --> Qdrant[(Qdrant Cloud<br/>Dense + Sparse Vectors)]
+    Sparse --> Qdrant
 ```
 
 ---
