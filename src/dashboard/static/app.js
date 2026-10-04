@@ -406,11 +406,13 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    // Convert inline citations like [Source: filename, Page X] into styled citation pills
-    const citationRegex = /\[Source:\s*([^,\]]+)(?:,\s*Page\s*([^\]]+))?\]/gi;
-    let formatted = escapeHtml(answer).replace(citationRegex, (match, src, page) => {
-      const pageInfo = page ? `p. ${page.trim()}` : "p. 1";
-      return `<span class="citation-pill mono" title="${match}">⚲ ${src.trim()} [${pageInfo}]</span>`;
+    // Render page-based or section-based citations without inventing a default page.
+    const citationRegex = /\[Source:\s*([^,\]]+)(?:,\s*(Page|Section)\s*:?\s*([^\]]+))?\]/gi;
+    let formatted = escapeHtml(answer).replace(citationRegex, (match, src, kind, value) => {
+      const detail = kind && value
+        ? ` [${kind.toLowerCase() === "page" ? "p. " : "section: "}${value.trim()}]`
+        : "";
+      return `<span class="citation-pill mono" title="${match}">⚲ ${src.trim()}${detail}</span>`;
     });
 
     // Convert newlines to paragraphs
@@ -432,13 +434,13 @@ document.addEventListener("DOMContentLoaded", () => {
     chunks.forEach((c, idx) => {
       const cosineStr = c.score !== null && c.score !== undefined ? `Cosine: ${c.score.toFixed(4)}` : "Cosine: N/A";
       const rerankStr = c.rerank_score !== null && c.rerank_score !== undefined ? ` | Rerank: ${c.rerank_score.toFixed(4)}` : "";
-      const pageStr = (c.page_numbers && c.page_numbers.length) ? `Pages: [${c.page_numbers.join(", ")}]` : "Page: 1";
+      const pageStr = (c.page_numbers && c.page_numbers.length) ? ` (Pages: [${c.page_numbers.join(", ")}])` : "";
 
       const card = document.createElement("div");
       card.className = "chunk-card";
       card.innerHTML = `
         <div class="chunk-meta-bar">
-          <span>#${idx + 1} | ${escapeHtml(c.source_file)} (${pageStr})</span>
+          <span>#${idx + 1} | ${escapeHtml(c.source_file)}${pageStr}</span>
           <div>
             <span class="text-ice">${cosineStr}</span>
             <span class="text-emerald mono font-bold">${rerankStr}</span>

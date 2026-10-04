@@ -16,3 +16,4 @@ qdrant_data/
 test_ingestion.py
 test_agent_graph.py
 treamed dashboard responses
+data/
