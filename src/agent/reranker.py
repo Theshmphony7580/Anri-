@@ -12,6 +12,8 @@ import re
 import threading
 from typing import List, Optional
 
+import httpx
+
 from schemas import DocumentChunk
 from config import get_settings
 
@@ -249,11 +251,72 @@ class BGEReranker:
         return scored_chunks[:limit]
 
 
-def get_reranker() -> BGEReranker:
-    """Return the thread-safe singleton instance of BGEReranker."""
+class RemoteModelServiceReranker:
+    """Call the configured ANRI model service for reranking candidate chunks."""
+
+    def __init__(self):
+        settings = get_settings()
+        self.base_url = (settings.MODEL_SERVICE_URL or "").rstrip("/")
+        self.api_key = settings.MODEL_SERVICE_API_KEY
+        self.timeout = settings.MODEL_SERVICE_TIMEOUT_SECONDS
+        self.provider = "remote"
+        self.model_name = settings.RERANKER_MODEL
+        self.device = "remote"
+        if not self.base_url:
+            raise ValueError("MODEL_SERVICE_URL must be configured for remote reranking.")
+        if not self.api_key:
+            raise ValueError("MODEL_SERVICE_API_KEY must be configured for remote reranking.")
+
+    def warmup(self):
+        """Do not block ANRI startup on the remote computer being online."""
+
+    def rerank(self, query: str, chunks: List[DocumentChunk], top_n: Optional[int] = None) -> List[DocumentChunk]:
+        if not chunks or not query:
+            return chunks
+
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                response = client.post(
+                    f"{self.base_url}/v1/rerank",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json={
+                        "query": query,
+                        "documents": [chunk.text for chunk in chunks],
+                        "top_n": top_n or len(chunks),
+                    },
+                )
+                response.raise_for_status()
+                results = response.json().get("results")
+        except Exception as exc:
+            raise RuntimeError(f"Remote reranking service request failed: {exc}") from exc
+
+        if not isinstance(results, list):
+            raise RuntimeError("Remote reranking service returned an invalid result list.")
+
+        ranked_chunks = []
+        for result in results:
+            try:
+                index = int(result["index"])
+                score = float(result["score"])
+                chunk = chunks[index]
+            except (KeyError, TypeError, ValueError, IndexError) as exc:
+                raise RuntimeError("Remote reranking service returned an invalid candidate index or score.") from exc
+            if chunk.metadata is None:
+                chunk.metadata = {}
+            chunk.metadata["rerank_score"] = round(score, 4)
+            ranked_chunks.append(chunk)
+        return ranked_chunks[:top_n] if top_n is not None else ranked_chunks
+
+
+def get_reranker():
+    """Return the thread-safe singleton configured local or remote reranker."""
     global _GLOBAL_RERANKER
     if _GLOBAL_RERANKER is None:
         with _RERANKER_LOCK:
             if _GLOBAL_RERANKER is None:
-                _GLOBAL_RERANKER = BGEReranker()
+                settings = get_settings()
+                if settings.MODEL_SERVICE_URL:
+                    _GLOBAL_RERANKER = RemoteModelServiceReranker()
+                else:
+                    _GLOBAL_RERANKER = BGEReranker()
     return _GLOBAL_RERANKER

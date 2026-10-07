@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     EMBEDDING_DIM: int = 384
     EMBEDDING_DEVICE: str = "cuda"
 
+    # --- Optional remote local-model service (e.g. behind an authenticated tunnel) ---
+    MODEL_SERVICE_URL: Optional[str] = None
+    MODEL_SERVICE_API_KEY: Optional[str] = None
+    MODEL_SERVICE_TIMEOUT_SECONDS: float = 120.0
+
     # --- Qdrant Vector Database (Local Disk Default) ---
     QDRANT_PATH: str = DEFAULT_QDRANT_PATH
     QDRANT_URL: Optional[str] = None
