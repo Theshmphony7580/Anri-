@@ -8,12 +8,15 @@ Implements stage two of the retrieval pipeline:
 """
 
 import logging
+import math
 import re
 import threading
 from typing import List, Optional
 
+import httpx
+
 from schemas import DocumentChunk
-from config import get_settings
+from config import get_settings, validate_model_service_url
 
 logger = logging.getLogger(__name__)
 
@@ -249,11 +252,88 @@ class BGEReranker:
         return scored_chunks[:limit]
 
 
-def get_reranker() -> BGEReranker:
-    """Return the thread-safe singleton instance of BGEReranker."""
+class RemoteModelServiceReranker:
+    """Call the configured ANRI model service for reranking candidate chunks."""
+
+    def __init__(self):
+        """Load remote inference settings and validate the service destination."""
+        settings = get_settings()
+        self.base_url = validate_model_service_url(settings.MODEL_SERVICE_URL)
+        self.api_key = settings.MODEL_SERVICE_API_KEY
+        self.timeout = settings.MODEL_SERVICE_TIMEOUT_SECONDS
+        self.provider = "remote"
+        self.model_name = settings.RERANKER_MODEL
+        self.device = "remote"
+        if not self.base_url:
+            raise ValueError("MODEL_SERVICE_URL must be configured for remote reranking.")
+        if not self.api_key:
+            raise ValueError("MODEL_SERVICE_API_KEY must be configured for remote reranking.")
+
+    def warmup(self):
+        """Do not block ANRI startup on the remote computer being online."""
+
+    def rerank(self, query: str, chunks: List[DocumentChunk], top_n: Optional[int] = None) -> List[DocumentChunk]:
+        """Return top-ranked chunks without partially mutating them on bad data."""
+        if not chunks or not query:
+            return chunks
+
+        settings = get_settings()
+        limit = top_n if top_n is not None else settings.RETRIEVAL_TOP_K
+        if limit <= 0:
+            return []
+        candidates = chunks[:64]
+
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                response = client.post(
+                    f"{self.base_url}/v1/rerank",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json={
+                        "query": query,
+                        "documents": [chunk.text for chunk in candidates],
+                        "top_n": min(limit, len(candidates), 64),
+                    },
+                )
+                response.raise_for_status()
+                results = response.json().get("results")
+        except Exception as exc:
+            raise RuntimeError(f"Remote reranking service request failed: {exc}") from exc
+
+        if not isinstance(results, list):
+            raise RuntimeError("Remote reranking service returned an invalid result list.")
+
+        ranked_results = []
+        seen_indices = set()
+        for result in results:
+            try:
+                index = int(result["index"])
+                score = float(result["score"])
+                if index < 0 or index in seen_indices or not math.isfinite(score):
+                    raise ValueError("duplicate candidate index or non-finite score")
+                chunk = candidates[index]
+            except (KeyError, TypeError, ValueError, IndexError) as exc:
+                raise RuntimeError("Remote reranking service returned an invalid candidate index or score.") from exc
+            seen_indices.add(index)
+            ranked_results.append((chunk, score))
+
+        ranked_chunks = []
+        for chunk, score in ranked_results:
+            if chunk.metadata is None:
+                chunk.metadata = {}
+            chunk.metadata["rerank_score"] = round(score, 4)
+            ranked_chunks.append(chunk)
+        return ranked_chunks[:limit]
+
+
+def get_reranker():
+    """Return the thread-safe singleton configured local or remote reranker."""
     global _GLOBAL_RERANKER
     if _GLOBAL_RERANKER is None:
         with _RERANKER_LOCK:
             if _GLOBAL_RERANKER is None:
-                _GLOBAL_RERANKER = BGEReranker()
+                settings = get_settings()
+                if settings.MODEL_SERVICE_URL:
+                    _GLOBAL_RERANKER = RemoteModelServiceReranker()
+                else:
+                    _GLOBAL_RERANKER = BGEReranker()
     return _GLOBAL_RERANKER

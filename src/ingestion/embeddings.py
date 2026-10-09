@@ -12,7 +12,7 @@ from typing import List, Optional
 
 import httpx
 
-from config import get_settings
+from config import get_settings, validate_model_service_url
 
 logger = logging.getLogger(__name__)
 
@@ -251,6 +251,68 @@ class GeminiEmbedder:
         return [v / norm for v in raw_values]
 
 
+class RemoteModelServiceEmbedder:
+    """Call a compatible ANRI model service for embeddings instead of loading weights here."""
+
+    def __init__(self):
+        """Load remote inference settings and validate the service destination."""
+        settings = get_settings()
+        self.base_url = validate_model_service_url(settings.MODEL_SERVICE_URL)
+        self.api_key = settings.MODEL_SERVICE_API_KEY
+        self.vector_dim = settings.EMBEDDING_DIM
+        self.timeout = settings.MODEL_SERVICE_TIMEOUT_SECONDS
+        if not self.base_url:
+            raise ValueError("MODEL_SERVICE_URL must be configured for remote embeddings.")
+        if not self.api_key:
+            raise ValueError("MODEL_SERVICE_API_KEY must be configured for remote embeddings.")
+
+    def warmup(self):
+        """Do not block ANRI startup on the remote computer being online."""
+
+    def embed_text(self, text: str, is_query: bool = False) -> List[float]:
+        """Return one vector from the remote service."""
+        return self.embed_batch([text], is_query=is_query)[0]
+
+    def embed_batch(self, texts: List[str], is_query: bool = False) -> List[List[float]]:
+        """Embed texts in bounded batches while preserving input order."""
+        if not texts:
+            return []
+
+        vectors = []
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                for start in range(0, len(texts), 32):
+                    batch = texts[start:start + 32]
+                    response = client.post(
+                        f"{self.base_url}/v1/embeddings",
+                        headers={"Authorization": f"Bearer {self.api_key}"},
+                        json={"texts": batch, "is_query": is_query},
+                    )
+                    response.raise_for_status()
+                    batch_vectors = response.json().get("embeddings")
+                    if not isinstance(batch_vectors, list) or len(batch_vectors) != len(batch):
+                        raise RuntimeError("Remote embedding service returned an unexpected number of vectors.")
+                    vectors.extend(batch_vectors)
+        except Exception as exc:
+            raise RuntimeError(f"Remote embedding service request failed: {exc}") from exc
+
+        if not isinstance(vectors, list) or len(vectors) != len(texts):
+            raise RuntimeError("Remote embedding service returned an unexpected number of vectors.")
+        for vector in vectors:
+            if not isinstance(vector, list) or len(vector) != self.vector_dim:
+                raise RuntimeError(
+                    f"Remote embedding dimension does not match EMBEDDING_DIM={self.vector_dim}; "
+                    "keep the local and ANRI embedding model/configuration identical."
+                )
+        try:
+            converted = [[float(value) for value in vector] for vector in vectors]
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Remote embedding service returned a non-numeric vector value.") from exc
+        if any(not math.isfinite(value) for vector in converted for value in vector):
+            raise RuntimeError("Remote embedding service returned a non-finite vector value.")
+        return converted
+
+
 def get_embedder():
     """Return the thread-safe singleton instance of the configured embedding provider."""
     global _GLOBAL_EMBEDDER
@@ -258,11 +320,14 @@ def get_embedder():
         with _EMBEDDER_LOCK:
             if _GLOBAL_EMBEDDER is None:
                 settings = get_settings()
-                provider = settings.EMBEDDING_PROVIDER.lower()
-                if provider == "gemini":
-                    _GLOBAL_EMBEDDER = GeminiEmbedder()
+                if settings.MODEL_SERVICE_URL:
+                    _GLOBAL_EMBEDDER = RemoteModelServiceEmbedder()
                 else:
-                    _GLOBAL_EMBEDDER = HuggingFaceEmbedder()
+                    provider = settings.EMBEDDING_PROVIDER.lower()
+                    if provider == "gemini":
+                        _GLOBAL_EMBEDDER = GeminiEmbedder()
+                    else:
+                        _GLOBAL_EMBEDDER = HuggingFaceEmbedder()
     return _GLOBAL_EMBEDDER
 
 
