@@ -64,11 +64,15 @@ TextInput = Annotated[str, StringConstraints(max_length=50_000)]
 
 
 class EmbeddingRequest(BaseModel):
+    """Validated text batch for embedding inference."""
+
     texts: List[TextInput] = Field(min_length=1, max_length=32)
     is_query: bool = False
 
 
 class RerankRequest(BaseModel):
+    """Validated query and candidate batch for reranking inference."""
+
     query: Annotated[str, StringConstraints(min_length=1, max_length=10_000)]
     documents: List[TextInput] = Field(min_length=1, max_length=64)
     top_n: int = Field(default=4, ge=1, le=64)
@@ -81,7 +85,9 @@ def require_service_key(authorization: Optional[str] = Header(default=None)) -> 
         raise HTTPException(status_code=503, detail="Model service authentication is not configured.")
 
     expected_header = f"Bearer {expected_key}"
-    if not authorization or not hmac.compare_digest(authorization, expected_header):
+    if not authorization or not hmac.compare_digest(
+        authorization.encode("utf-8"), expected_header.encode("utf-8")
+    ):
         raise HTTPException(
             status_code=401,
             detail="Invalid or missing model service token.",
@@ -97,6 +103,7 @@ def health():
 
 @app.post("/v1/embeddings", dependencies=[Depends(require_service_key)])
 async def create_embeddings(payload: EmbeddingRequest):
+    """Generate vectors for a bounded text batch."""
     try:
         vectors = await asyncio.to_thread(
             get_embedder().embed_batch,
@@ -114,6 +121,7 @@ async def create_embeddings(payload: EmbeddingRequest):
 
 @app.post("/v1/rerank", dependencies=[Depends(require_service_key)])
 async def rerank_documents(payload: RerankRequest):
+    """Return ranked candidate indexes and scores for a bounded request."""
     candidates = [DocumentChunk(id=str(index), text=text) for index, text in enumerate(payload.documents)]
     try:
         ranked = await asyncio.to_thread(
