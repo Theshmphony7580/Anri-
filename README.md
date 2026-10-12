@@ -1,93 +1,128 @@
-# ANRI - Enterprise Document RAG Agent
+<a id="top"></a>
 
-A production-grade, self-correcting Retrieval-Augmented Generation (RAG) system built with **LangGraph**, **IBM Docling**, **Qdrant**, and a **Two-Stage Retrieval** pipeline (Dense Embeddings + Cross-Encoder Reranking).
-
-Equipped with an industrial **Precision Observability Console** providing real-time telemetry, live execution tracing across state machine nodes, and cryptographic document provenance.
+<div align="center">
+  <h1>ANRI</h1>
+  <p><strong>Enterprise Document RAG Agent</strong></p>
+  <p>Retrieve evidence. Refine the query. Answer with citations.</p>
+  <p>
+    <a href="#installation--setup">Get started</a> ·
+    <a href="#system-architecture">Architecture</a> ·
+    <a href="#rest-api-reference">API reference</a> ·
+    <a href="docs/local-model-service.md">Remote models</a>
+  </p>
+</div>
 
 ---
+
+ANRI is a self-correcting Retrieval-Augmented Generation system built with **LangGraph**, **IBM Docling**, and **Qdrant**. Dense retrieval and reranking select document evidence before answer generation. The **Precision Observability Console** displays execution traces, latency, retrieval scores, and source metadata.
+
+## Contents
+
+| Build & run | Understand & operate |
+| --- | --- |
+| [Installation & setup](#installation--setup) | [Key features](#key-features) · [Tech stack](#tech-stack) |
+| [Running the application](#running-the-application) | [System architecture](#system-architecture) · [Repository structure](#repository-structure) |
+| [Environment variables](#environment-variables-reference) | [Technical deep dive](#core-technical-deep-dive) · [REST API](#rest-api-reference) |
+| [Automated testing](#automated-testing) | [Troubleshooting](#troubleshooting-guide) · [License](#license) |
 
 ## Key Features
 
-- **Self-Correcting Reasoning Loop (LangGraph):** State-machine driven retrieval with active relevance grading, query reformulation, and bounded retries before strict, grounded generation.
-- **Intent Classification & Triage Routing:** Automatically distinguishes casual conversation from document research queries, routing greetings directly to an LLM generator while bypassing vector search.
-- **Two-Stage Retrieval Architecture:** Fetches a wide candidate pool ($k=15$) via local dense embeddings (`BAAI/bge-small-en-v1.5`), then reranks down to the top-4 most relevant chunks via a local Cross-Encoder (`ms-marco-MiniLM-L-12-v2` / `BAAI/bge-reranker-base`).
-- **Layout-Aware Document Parsing:** Ingests complex PDFs and Markdown using **IBM Docling** and `HierarchicalChunker`, preserving document layout hierarchy, heading breadcrumbs (`H1 > H2 > H3`), and tabular data.
-- **Forensic VLM Visual Analysis:** Embedded charts, diagrams, and figures are captioned using **Google Gemini Vision** with a structured, data-extraction prompt.
-- **Cryptographic Document Ledger:** Content-addressable ingestion with SHA-256 deduplication to eliminate redundant indexing.
-- **Sub-Second Warm Inferences:** Zero cold-start per query via FastAPI startup `lifespan` pre-warming of model weights into RAM/CUDA VRAM.
-- **Industrial Observability Console:** Zero-dependency (Vanilla HTML5/CSS/JS) high-density operations dashboard displaying real-time vector counts, latency traces, circuit state transitions, and chunk metadata.
-
----
+- **Self-correcting retrieval:** Intent routing, context grading, and up to two query rewrites before a grounded answer or refusal.
+- **Two-stage search:** Dense retrieval selects 15 candidates by default; FlashRank reranks them to the top 4. Local and remote model execution are supported.
+- **Document ingestion:** Docling extracts structured text and chunks; optional Gemini Vision captions figures. SHA-256 checks skip duplicate documents.
+- **Flexible storage:** Use local Qdrant storage or a remote Qdrant server, including Qdrant Cloud.
+- **Execution visibility:** Inspect node timings, chunk metadata, retrieval scores, and streamed answer tokens in the dashboard. Startup warmup reduces model loading during queries.
 
 ## Tech Stack
 
 | Layer | Technologies |
-|---|---|
+| --- | --- |
 | **Core Runtime** | Python 3.12, `uv` package manager |
 | **Agentic Orchestration** | LangGraph, LangChain Core |
-| **Vector Storage** | Qdrant (Local disk storage with `portalocker` thread synchronization) |
-| **Embeddings** | Local Hugging Face `BAAI/bge-small-en-v1.5` (384-dim, CUDA/CPU) with Gemini REST fallback |
+| **Vector Storage** | Qdrant: local disk, in-memory development, or remote server / Cloud |
+| **Embeddings** | Local Hugging Face `BAAI/bge-small-en-v1.5` (384-dim, CUDA/CPU) or Gemini REST embeddings |
 | **Reranking** | Local Cross-Encoder / FlashRank (`ms-marco-MiniLM-L-12-v2`, `BAAI/bge-reranker-base`) |
 | **LLM Inference** | Groq REST API (`qwen/qwen3.8-27b`) & Google Gemini REST API (`gemini-3.6-flash`) |
 | **Document Ingestion** | IBM Docling (`HierarchicalChunker`), `pypdf`, Gemini Vision VLM |
 | **API & Dashboard** | FastAPI, Uvicorn, Vanilla CSS/JS SPA |
 
----
-
 ## System Architecture
 
-> **Target architecture:** ANRI's knowledge domain is determined by the supported documents currently ingested and indexed. It is not tied to a single subject; ingesting a different document corpus changes the material ANRI can retrieve and use to answer questions. The diagrams below show the planned Qdrant Cloud hybrid retrieval design.
+The diagrams describe the **current implementation**. The indexed corpus determines which documents ANRI can retrieve; Rust documentation is the current project corpus. Candidate counts and the relevance threshold are configurable.
 
-### 1. Agent Reasoning Loop (LangGraph State Machine)
+### 1. Query and self-correction flow
+
+Triage selects a direct conversational response or the retrieval pipeline. Low relevance triggers up to two rewrites; continued low relevance produces a refusal in the generate node.
 
 ```mermaid
 flowchart TD
-    Start([User Input]) --> Triage[00 // Triage Node]
-    Triage -->|intent == 'direct'| DirectGen[Direct Conversational Generator]
-    DirectGen --> Output([Final Answer])
-
-    Triage -->|intent == 'retrieval'| Retrieve[01 // Retrieve Node<br/>Qdrant Cloud Dense + Sparse Search]
-    Retrieve --> Fuse[Rank Fusion<br/>Reciprocal Rank Fusion]
-    Fuse --> Rerank[01.5 // Rerank Node<br/>Cross-Encoder Rescoring Top-4]
-    Rerank --> Grade[02 // Grade Node<br/>Context Relevance Evaluation]
-
-    Grade -->|Score >= 0.70 or Max Retries| Generate[04 // Generate Node<br/>Synthesize Grounded Answer]
-    Grade -->|Score < 0.70 and Retries < 2| Rewrite[03 // Rewrite Node<br/>Query Reformulation]
-
+    Input([User question]) --> Triage["Triage node<br/>Classify intent"]
+    Triage -->|Direct conversation| Direct["Direct generate node"]
+    Triage -->|Document research| Retrieve["Retrieve node<br/>Dense Qdrant search · top 15"]
+    Retrieve --> Rerank["Rerank node<br/>FlashRank by default · top 4"]
+    Rerank --> Grade["Grade node<br/>LLM context relevance score"]
+    Grade --> Gate{"Score meets threshold?<br/>Default: 0.70"}
+    Gate -->|Yes| Generate["Generate node<br/>Answer with source citations"]
+    Gate -->|No| Retry{"Fewer than 2 rewrites?"}
+    Retry -->|Yes| Rewrite["Rewrite node<br/>Reformulate query"]
     Rewrite --> Retrieve
+    Retry -->|No| Refuse["Generate node<br/>Return insufficient-evidence refusal"]
+    Direct --> Output([Final response])
     Generate --> Output
+    Refuse --> Output
+
+    classDef action fill:#eff6ff,stroke:#2563eb,color:#172554;
+    classDef decision fill:#fff7ed,stroke:#c2410c,color:#431407;
+    classDef terminal fill:#f0fdf4,stroke:#15803d,color:#14532d;
+    classDef refusal fill:#fff1f2,stroke:#be123c,color:#881337;
+    class Triage,Direct,Retrieve,Rerank,Grade,Rewrite,Generate action;
+    class Gate,Retry decision;
+    class Input,Output terminal;
+    class Refuse refusal;
 ```
 
-### 2. Document Ingestion Pipeline
+The two generate boxes show the answer and refusal branches of the same node. Disabling reranking skips model rescoring. The grade is an LLM relevance judgment, not a calibrated probability of answer correctness.
 
-Each ingested corpus defines the subject matter available to ANRI. Ingestion uses the formats and document structures supported by the configured parsers.
+### 2. Document ingestion flow
+
+Duplicate documents are skipped unless force reindexing is requested. PDF picture extraction is disabled by default; standalone images use the vision path directly.
 
 ```mermaid
-flowchart LR
-    Upload[Supported Document Upload] --> Hash[SHA-256 Hash Check]
-    Hash -->|Hash Exists| Skip[Skip / Return Existing Doc ID]
-    Hash -->|New Document| Docling[IBM Docling Parser<br/>do_ocr=False]
+flowchart TD
+    Upload([Document or image]) --> Hash["Compute SHA-256"]
+    Hash --> Duplicate{"Already indexed?<br/>Unless force reindexing"}
+    Duplicate -->|Yes| Skip([Skip duplicate])
+    Duplicate -->|No| Type{"Standalone image?"}
+    Type -->|No| Parse["Docling parser<br/>OCR disabled"]
+    Parse --> Chunks["Hierarchical chunks<br/>Text and available tables"]
+    Parse -.->|Optional PDF picture extraction| Vision["Gemini Vision<br/>Figure descriptions"]
+    Type -->|Yes| Vision
+    Chunks --> Metadata["Chunks with source metadata<br/>doc_hash · page_numbers · section_path"]
+    Vision --> Metadata
+    Metadata --> Dense["Dense embeddings<br/>BGE by default · 384 dimensions"]
+    Dense --> Qdrant[("Qdrant<br/>Local or remote storage")]
+    Qdrant --> Done([Document indexed])
 
-    Docling --> TextElem[Hierarchical Chunker<br/>Preserve Tables & Breadcrumbs]
-    Docling --> VisualElem[Visual Elements<br/>Charts & Figures]
-    VisualElem --> VLM[Gemini Vision VLM<br/>Forensic Image Captioning]
-
-    TextElem --> MetaInject[Metadata Injector<br/>doc_hash, section_path, page_num]
-    VLM --> MetaInject
-
-    MetaInject --> Dense[Dense Embedding<br/>Semantic representation]
-    MetaInject --> Sparse[Sparse BM25 Representation<br/>Keyword matching]
-    Dense --> Qdrant[(Qdrant Cloud<br/>Dense + Sparse Vectors)]
-    Sparse --> Qdrant
+    classDef action fill:#eff6ff,stroke:#2563eb,color:#172554;
+    classDef decision fill:#fff7ed,stroke:#c2410c,color:#431407;
+    classDef terminal fill:#f0fdf4,stroke:#15803d,color:#14532d;
+    classDef optional fill:#f5f3ff,stroke:#7c3aed,color:#3b0764;
+    class Hash,Parse,Chunks,Metadata,Dense action;
+    class Duplicate,Type decision;
+    class Upload,Skip,Done,Qdrant terminal;
+    class Vision optional;
 ```
 
----
+**Planned retrieval upgrade:** Dense + sparse BM25 search with reciprocal rank fusion remains future work. It is not part of the running pipeline shown above.
 
 ## Repository Structure
 
-```
+<details>
+<summary>Browse the project layout</summary>
+
+```text
 anri/
-├── main.py                            # Production application launcher (Uvicorn server)
+├── main.py                            # Local development launcher (Uvicorn server)
 ├── test_agent_graph.py                # End-to-end integration test suite
 ├── list_gemini_models.py              # Utility to inspect Gemini API quotas & models
 ├── pyproject.toml                     # uv project configuration and dependencies
@@ -111,38 +146,39 @@ anri/
     │   ├── pipeline.py                # SHA-256 ingestion orchestrator
     │   └── vision.py                  # Gemini Vision VLM figure extraction
     ├── storage/
-    │   └── vector_store.py            # Thread-safe Qdrant disk storage singleton
+    │   └── vector_store.py            # Thread-safe Qdrant client singleton
     └── dashboard/
         ├── server.py                  # FastAPI telemetry service & execution tracer
         └── static/
             ├── index.html             # Precision Observability Console interface
-            ├── style.css              # Industrial anti-purple high-density styling
+            ├── style.css              # Dashboard layout and visual styling
             └── app.js                 # Event listeners, circuit animations, and REST polling
 ```
 
----
+</details>
 
 ## Prerequisites
 
-- **Python**: `3.12+` (bounded `< 3.13` for PyTorch CUDA compatibility)
+- **Python**: `3.12` (the project requires `>=3.12,<3.13`)
 - **Package Manager**: [uv](https://github.com/astral-sh/uv) (recommended) or standard `pip`
 - **Hardware Acceleration (Optional)**: NVIDIA GPU with CUDA 12.x for accelerated local embedding and cross-encoder inference (CPU fallback supported automatically)
 - **API Keys**:
-  - [Groq API Key](https://console.groq.com/) (Required for sub-second primary LLM inference)
+  - [Groq API Key](https://console.groq.com/) (Required when using Groq for generation)
   - [Google Gemini API Key](https://aistudio.google.com/) (Optional: required for VLM diagram captioning or Gemini embeddings)
-
----
 
 ## Installation & Setup
 
 ### 1. Clone the Repository
+
 ```bash
-git clone https://github.com/your-org/anri.git
-cd anri
+git clone https://github.com/Theshmphony7580/Anri-.git
+cd Anri-
 ```
 
 ### 2. Set Up Virtual Environment & Dependencies
+
 Using `uv`:
+
 ```bash
 uv venv --python 3.12
 ```
@@ -158,6 +194,7 @@ Activate the virtual environment:
   ```
 
 Install dependencies:
+
 ```bash
 uv sync
 ```
@@ -170,12 +207,23 @@ uv sync
 > ```
 
 ### 3. Configure Environment Variables
-Copy `.env.example` to `.env`:
+
+Copy [`.env.example`](.env.example) to `.env`:
+
+**Windows (PowerShell)**
+
+```powershell
+Copy-Item .env.example .env
+```
+
+**Linux / macOS**
+
 ```bash
 cp .env.example .env
 ```
 
 Edit `.env` with your API credentials:
+
 ```ini
 # Primary LLM Engine
 LLM_PROVIDER=groq
@@ -198,9 +246,11 @@ USE_RERANKER=true
 RERANKER_PROVIDER=flashrank
 RERANKER_MODEL=ms-marco-MiniLM-L-12-v2
 RERANK_CANDIDATES_K=15
-RERANKER_DEVICE=cuda
+RERANKER_DEVICE=cpu
 
-# Vector DB & Storage
+# Vector DB & Storage (set QDRANT_URL for a remote server)
+QDRANT_URL=
+QDRANT_API_KEY=
 QDRANT_PATH=./qdrant_data
 QDRANT_COLLECTION_NAME=knowledge_chunks
 
@@ -209,25 +259,26 @@ CONFIDENCE_THRESHOLD=0.70
 RETRIEVAL_TOP_K=4
 ```
 
----
-
 ## Running the Application
 
 ### 1. Start the Precision Observability Console
+
 Launch the FastAPI development server:
+
 ```bash
 python main.py
 ```
 *(Or via `uv`: `uv run --no-sync main.py`)*
 
 The server will initialize, pre-warm embedding and reranker weights into RAM/VRAM via the FastAPI `lifespan` handler, and mount the dashboard at:
-👉 **[http://127.0.0.1:8000](http://127.0.0.1:8000)**
+**[Open the dashboard](http://127.0.0.1:8000)**
 
-### Run models on a separate local computer
+### 2. Run models on a separate computer
 
 ANRI can send embedding and reranking requests to a local model service over an authenticated HTTPS tunnel. See the [local model service guide](docs/local-model-service.md) for setup and configuration. Keep the embedding model and vector dimension identical to the ones used for the existing Qdrant collection.
 
-### 2. Ingesting Documents
+### 3. Ingest documents
+
 - **Via the Web Console**: Drag and drop any `.pdf`, `.md`, or `.txt` file into the upload zone on the dashboard. Ingestion progress, chunk count, and SHA-256 hash will be displayed in real time.
 - **Via Python API**:
   ```python
@@ -238,7 +289,8 @@ ANRI can send embedding and reranking requests to a local model service over an 
   print(f"Status: {result.status} | Chunks: {result.chunk_count}")
   ```
 
-### 3. Querying the Agent
+### 4. Query the agent
+
 - **Via the Web Console**: Enter questions in the command input box. Watch the circuit flow light up dynamically as nodes execute. Click any chunk to open the metadata inspection drawer.
 - **Via Python API**:
   ```python
@@ -251,12 +303,10 @@ ANRI can send embedding and reranking requests to a local model service over an 
       print(f"- {src.metadata['source_file']} [p. {src.metadata['page_numbers']}]")
   ```
 
----
-
 ## Environment Variables Reference
 
 | Variable | Type | Default | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `LLM_PROVIDER` | string | `"groq"` | Active inference engine (`"groq"` or `"gemini"`). |
 | `GROQ_API_KEY` | string | `None` | Authentication key for Groq Cloud API. |
 | `GROQ_MODEL` | string | `"qwen/qwen3.8-27b"` | Groq LLM model name. |
@@ -276,73 +326,82 @@ ANRI can send embedding and reranking requests to a local model service over an 
 | `RERANK_CANDIDATES_K` | int | `15` | Number of candidate chunks retrieved from vector store. |
 | `RETRIEVAL_TOP_K` | int | `4` | Number of top reranked chunks passed to generator node. |
 | `CONFIDENCE_THRESHOLD`| float | `0.70` | Minimum relevance score required to bypass query rewriter. |
+| `QDRANT_URL` | string | empty | Remote Qdrant URL; when set, remote storage is used instead of the local path. |
+| `QDRANT_API_KEY` | string | `None` | Authentication key for a remote Qdrant server or Cloud cluster. |
 | `QDRANT_PATH` | string | `"./qdrant_data"` | Local disk storage path for Qdrant database. |
 | `QDRANT_COLLECTION_NAME`| string | `"knowledge_chunks"` | Qdrant collection identifier. |
-| `DO_OCR` | bool | `false` | Enable/disable OCR during IBM Docling parsing. |
-
----
+| `DO_OCR` | bool | `false` | Reserved setting; the current PDF parser disables OCR. |
+| `GENERATE_PICTURE_IMAGES` | bool | `false` | Enable PDF picture extraction for the Gemini Vision captioning path. |
+| `DO_TABLE_STRUCTURE` | bool | `false` | Enable Docling table-structure processing. |
 
 ## Core Technical Deep Dive
 
 ### 1. Intent Classification & Triage
+
 Before querying the vector database, incoming queries pass through `triage_node`:
 - **Direct Queries** (e.g., *"Hello"*, *"What can you do?"*, *"Who are you?"*): Routed directly to `direct_generate_node`. Generates a conversational greeting without executing expensive embedding or vector searches.
 - **Retrieval Queries** (e.g., *"What is the formula on page 4?"*): Routed to the full two-stage RAG pipeline.
 
 ### 2. Two-Stage Retrieval
+
 Dense embedding search handles semantic recall, but cross-encoders provide superior precision:
+
 1. **Stage 1 (Bi-Encoder Dense Search):** Qdrant performs cosine similarity across all indexed vectors, retrieving the top $k=15$ candidate chunks.
 2. **Stage 2 (Cross-Encoder Reranker):** The query and candidates are jointly scored through a Cross-Encoder transformer (`(query, chunk_text)` pair). Chunks are sorted by cross-attention score, and only the top $k=4$ are supplied to the generation context.
 
 ### 3. Self-Correction & Grading
+
 The `grade_node` scores context relevance between $0.0$ and $1.0$:
 - **Pass ($\ge 0.70$):** High relevance detected. Context is forwarded to `generate_node` for grounded synthesis with citations.
 - **Fail ($< 0.70$):** Low relevance detected. If `retry_count < 2`, the graph routes to `rewrite_node`, reformulating the user's question with synonyms and structural clarity, then re-retrieves.
-- **Refusal Safeguard:** If relevance remains below threshold after 2 rewrites, the model issues a truthful refusal (*"I do not have sufficient information in the provided documents..."*), eliminating hallucinations.
+- **Refusal Safeguard:** If relevance remains below threshold after 2 rewrites, the model issues a truthful refusal (*"I do not have sufficient information in the provided documents..."*), when the relevance gate still fails.
 
 ### 4. Concurrency & Vector Store Thread Safety
+
 On Windows and multi-worker environments, Qdrant file-based storage uses lock files (`.lock`). To prevent `portalocker.exceptions.AlreadyLocked` crashes, `src/storage/vector_store.py` implements a process-wide singleton guarded by a reentrant lock (`threading.RLock`).
 
 ### 5. Vector Dimension Auto-Realignment
-If you switch embedding models (e.g., migrating between 768-dim Gemini and 384-dim BGE), `vector_store.ensure_collection()` detects the vector dimension mismatch automatically, archives the old collection, and re-initializes with the correct vector dimensions without throwing array broadcast exceptions.
 
----
+If you switch embedding models (e.g., migrating between 768-dim Gemini and 384-dim BGE), `vector_store.ensure_collection()` detects the vector dimension mismatch automatically, archives the old collection, and re-initializes with the correct vector dimensions without throwing array broadcast exceptions.
 
 ## REST API Reference
 
 The FastAPI telemetry service exposes the following endpoints:
 
 | Method | Endpoint | Description |
-|---|---|---|
+| --- | --- | --- |
 | `GET` | `/api/stats` | Returns real-time system stats: document counts, vector count, active embedding/reranker models, and hardware execution devices. |
 | `GET` | `/api/documents` | Scans the `data/` directory and returns indexing status and SHA-256 checksums for each file. |
-| `POST`| `/api/upload` | Multipart file upload to `data/` with automatic immediate indexing. |
-| `POST`| `/api/ingest` | Triggers indexing or re-indexing for a specific file in `data/`. Payload: `{"filename": "doc.pdf", "force_reindex": false}`. |
-| `POST`| `/api/query` | Executes the LangGraph agent reasoning loop. Returns step-by-step latency traces, node execution statuses, rerank scores, and final grounded answer. Payload: `{"question": "..."}`. |
-
----
+| `POST` | `/api/upload` | Multipart file upload to `data/` with automatic immediate indexing. |
+| `POST` | `/api/ingest` | Triggers indexing or re-indexing for a specific file in `data/`. Payload: `{"filename": "doc.pdf", "force_reindex": false}`. |
+| `POST` | `/api/query` | Executes the LangGraph agent reasoning loop. Returns step-by-step latency traces, node execution statuses, rerank scores, and final grounded answer. Payload: `{"question": "..."}`. |
+| `POST` | `/api/query/stream` | Server-sent events for node updates and incremental answer tokens. Payload: `{"question": "..."}`. |
 
 ## Automated Testing
 
 An end-to-end integration test suite is provided in `test_agent_graph.py`, covering:
+
 1. **Direct Conversational Route**: Validates triage routing without vector searches.
 2. **Grounded High-Confidence Flow**: Validates retrieval, cross-encoder scoring, and citation generation.
 3. **Structured Response Formatting**: Validates `QueryResponse` Pydantic models.
 4. **Self-Correction & Refusal**: Validates query rewriting and out-of-domain refusal.
 
 Run the test suite inside your virtual environment:
+
 ```bash
 python test_agent_graph.py
 ```
 
----
-
 ## Troubleshooting Guide
 
 ### 1. OpenBLAS Memory Allocation Crash on Windows
+
 **Symptom:** `OpenBLAS : BLAS : Program is Terminated. Because you tried to allocate more memory than system limit.`
+
 **Root Cause:** PyTorch and Docling spawn multiple worker threads initializing OpenBLAS thread pools concurrently, exceeding thread handles on Windows.
+
 **Fix:** `src/config.py` and `main.py` explicitly set single-threaded environment variables before any C-extension libraries load:
+
 ```python
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -350,19 +409,35 @@ os.environ["MKL_NUM_THREADS"] = "1"
 ```
 
 ### 2. PyTorch Replaced with CPU-Only Wheel
+
 **Symptom:** CUDA is available on system, but `EMBEDDING_DEVICE=cuda` falls back to CPU.
+
 **Root Cause:** Running `uv sync` without pinned index flags may pull standard PyPI CPU wheels.
+
 **Fix:** Always run with `uv run --no-sync main.py` or use your virtual environment's Python directly:
+
 ```bash
 .venv\Scripts\python.exe main.py
 ```
 
 ### 3. Qdrant File Lock Contention
-**Symptom:** `portalocker.exceptions.AlreadyLocked: .../qdrant_data/meta.json`
-**Fix:** Ensure multiple server instances are not running simultaneously. Always obtain the vector store client via `get_vector_store()`, which enforces the reentrant singleton pattern.
 
----
+**Symptom:** `portalocker.exceptions.AlreadyLocked: .../qdrant_data/meta.json`
+
+**Fix:** Ensure multiple server instances are not running simultaneously. Always obtain the vector store client via `get_vector_store()`, which enforces the reentrant singleton pattern.
 
 ## License
 
-ANRI (Enterprise Document RAG Agent) is licensed under the [Apache-2.0 License](LICENSE).
+The project README declares **Apache-2.0** licensing. A `LICENSE` file is not currently included in this checkout.
+
+---
+
+<div align="center">
+  <p><strong>ANRI</strong> · Enterprise Document RAG Agent</p>
+  <p>
+    <a href="docs/local-model-service.md">Model service guide</a> ·
+    <a href="QDRANT_CLOUD_MIGRATION_GUIDE.md">Qdrant Cloud guide</a> ·
+    <a href="https://github.com/Theshmphony7580/Anri-/issues">Report an issue</a> ·
+    <a href="#top">Back to top ↑</a>
+  </p>
+</div>
