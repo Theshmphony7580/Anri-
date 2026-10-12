@@ -259,7 +259,11 @@ class RemoteModelServiceEmbedder:
         settings = get_settings()
         self.base_url = validate_model_service_url(settings.MODEL_SERVICE_URL)
         self.api_key = settings.MODEL_SERVICE_API_KEY
-        self.vector_dim = settings.EMBEDDING_DIM
+        self.vector_dim = (
+            settings.GEMINI_EMBEDDING_DIM
+            if settings.EMBEDDING_PROVIDER.lower() == "gemini"
+            else settings.EMBEDDING_DIM
+        )
         self.timeout = settings.MODEL_SERVICE_TIMEOUT_SECONDS
         if not self.base_url:
             raise ValueError("MODEL_SERVICE_URL must be configured for remote embeddings.")
@@ -301,7 +305,7 @@ class RemoteModelServiceEmbedder:
         for vector in vectors:
             if not isinstance(vector, list) or len(vector) != self.vector_dim:
                 raise RuntimeError(
-                    f"Remote embedding dimension does not match EMBEDDING_DIM={self.vector_dim}; "
+                    f"Remote embedding dimension does not match the configured provider dimension ({self.vector_dim}); "
                     "keep the local and ANRI embedding model/configuration identical."
                 )
         try:

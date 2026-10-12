@@ -273,7 +273,7 @@ class RemoteModelServiceReranker:
         """Do not block ANRI startup on the remote computer being online."""
 
     def rerank(self, query: str, chunks: List[DocumentChunk], top_n: Optional[int] = None) -> List[DocumentChunk]:
-        """Return top-ranked chunks without partially mutating them on bad data."""
+        """Rerank all candidates in batches and merge scores before applying the limit."""
         if not chunks or not query:
             return chunks
 
@@ -281,48 +281,59 @@ class RemoteModelServiceReranker:
         limit = top_n if top_n is not None else settings.RETRIEVAL_TOP_K
         if limit <= 0:
             return []
-        candidates = chunks[:64]
 
+        ranked_results = []
         try:
             with httpx.Client(timeout=self.timeout) as client:
-                response = client.post(
-                    f"{self.base_url}/v1/rerank",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    json={
-                        "query": query,
-                        "documents": [chunk.text for chunk in candidates],
-                        "top_n": min(limit, len(candidates), 64),
-                    },
-                )
-                response.raise_for_status()
-                results = response.json().get("results")
+                for start in range(0, len(chunks), 64):
+                    candidates = chunks[start:start + 64]
+                    batch_limit = min(limit, len(candidates))
+                    response = client.post(
+                        f"{self.base_url}/v1/rerank",
+                        headers={"Authorization": f"Bearer {self.api_key}"},
+                        json={
+                            "query": query,
+                            "documents": [chunk.text for chunk in candidates],
+                            "top_n": batch_limit,
+                        },
+                    )
+                    response.raise_for_status()
+                    results = response.json().get("results")
+                    if not isinstance(results, list) or len(results) != batch_limit:
+                        raise RuntimeError("Remote reranking service returned an invalid result list.")
+
+                    batch_indices = set()
+                    for result in results:
+                        try:
+                            index = result["index"]
+                            score = float(result["score"])
+                            if (
+                                type(index) is not int
+                                or index < 0
+                                or index >= len(candidates)
+                                or index in batch_indices
+                                or not math.isfinite(score)
+                            ):
+                                raise ValueError("invalid candidate index or non-finite score")
+                        except (KeyError, TypeError, ValueError) as exc:
+                            raise RuntimeError(
+                                "Remote reranking service returned an invalid candidate index or score."
+                            ) from exc
+                        batch_indices.add(index)
+                        ranked_results.append((start + index, score))
         except Exception as exc:
             raise RuntimeError(f"Remote reranking service request failed: {exc}") from exc
 
-        if not isinstance(results, list):
-            raise RuntimeError("Remote reranking service returned an invalid result list.")
-
-        ranked_results = []
-        seen_indices = set()
-        for result in results:
-            try:
-                index = int(result["index"])
-                score = float(result["score"])
-                if index < 0 or index in seen_indices or not math.isfinite(score):
-                    raise ValueError("duplicate candidate index or non-finite score")
-                chunk = candidates[index]
-            except (KeyError, TypeError, ValueError, IndexError) as exc:
-                raise RuntimeError("Remote reranking service returned an invalid candidate index or score.") from exc
-            seen_indices.add(index)
-            ranked_results.append((chunk, score))
+        ranked_results.sort(key=lambda item: (item[1], -item[0]), reverse=True)
 
         ranked_chunks = []
-        for chunk, score in ranked_results:
+        for index, score in ranked_results[:limit]:
+            chunk = chunks[index]
             if chunk.metadata is None:
                 chunk.metadata = {}
             chunk.metadata["rerank_score"] = round(score, 4)
             ranked_chunks.append(chunk)
-        return ranked_chunks[:limit]
+        return ranked_chunks
 
 
 def get_reranker():

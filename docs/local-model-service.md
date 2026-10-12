@@ -21,6 +21,8 @@ Browser → ANRI API → Qdrant Cloud
   fail; ANRI does not silently switch to a different embedding space.
 - The service accepts at most 32 texts per embedding request and 64 candidates per
   reranking request.
+  ANRI splits larger inputs into batches, preserves embedding order, and merges
+  reranking scores across batches before selecting the final top results.
 
 ## Run locally
 
@@ -68,8 +70,9 @@ MODEL_SERVICE_API_KEY=<same-long-random-token>
 MODEL_SERVICE_TIMEOUT_SECONDS=120
 ```
 
-Also set the same embedding provider, model ID, and `EMBEDDING_DIM` as the local
-service and the existing Qdrant collection. `MODEL_SERVICE_URL` makes ANRI route
+Also set the same embedding provider, model ID, and vector dimension as the local
+service and the existing Qdrant collection. Hugging Face uses `EMBEDDING_DIM`;
+Gemini uses `GEMINI_EMBEDDING_DIM`. `MODEL_SERVICE_URL` makes ANRI route
 both query/document embeddings and reranking to the local service. Leave the URL
 empty on the computer running the inference service to avoid a proxy loop.
 
