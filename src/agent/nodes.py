@@ -109,7 +109,7 @@ def rerank_node(
     state: RAGState,
     reranker: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """Rescore candidate chunks with BAAI/bge-reranker-base and prune to RETRIEVAL_TOP_K."""
+    """Rescore candidate chunks with the configured reranker and prune to RETRIEVAL_TOP_K."""
     settings = get_settings()
     if not getattr(settings, "USE_RERANKER", True):
         return {}
