@@ -1,5 +1,4 @@
 import os
-import ipaddress
 
 # Prevent OpenBLAS/MKL thread memory exhaustion crashes on Windows
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -11,31 +10,11 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlsplit
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_QDRANT_PATH = str(ROOT_DIR / "qdrant_data")
 DEFAULT_ENV_FILE = str(ROOT_DIR / ".env")
-
-
-def validate_model_service_url(url: Optional[str]) -> str:
-    """Require HTTPS for remote inference, while allowing HTTP on loopback."""
-    normalized = (url or "").rstrip("/")
-    parsed = urlsplit(normalized)
-    hostname = parsed.hostname
-    if parsed.scheme == "https" and hostname:
-        return normalized
-
-    if parsed.scheme == "http" and hostname:
-        try:
-            is_loopback = ipaddress.ip_address(hostname).is_loopback
-        except ValueError:
-            is_loopback = hostname.lower() == "localhost" or hostname.lower().endswith(".localhost")
-        if is_loopback:
-            return normalized
-
-    raise ValueError("MODEL_SERVICE_URL must use HTTPS unless it targets a loopback HTTP address.")
 
 
 class Settings(BaseSettings):
@@ -61,11 +40,6 @@ class Settings(BaseSettings):
     EMBEDDING_DIM: int = 384
     EMBEDDING_DEVICE: str = "cuda"
 
-    # --- Optional remote local-model service (e.g. behind an authenticated tunnel) ---
-    MODEL_SERVICE_URL: Optional[str] = None
-    MODEL_SERVICE_API_KEY: Optional[str] = None
-    MODEL_SERVICE_TIMEOUT_SECONDS: float = 120.0
-
     # --- Qdrant Vector Database (Local Disk Default) ---
     QDRANT_PATH: str = DEFAULT_QDRANT_PATH
     QDRANT_URL: Optional[str] = None
@@ -85,7 +59,7 @@ class Settings(BaseSettings):
     FORCE_BACKEND_TEXT: bool = True
     GENERATE_PICTURE_IMAGES: bool = False
     CONFIDENCE_THRESHOLD: float = 0.70
-    RETRIEVAL_TOP_K: int = 4
+    RETRIEVAL_TOP_K: int = 5
     ALLOW_MOCK_FALLBACK: bool = False
 
     model_config = SettingsConfigDict(

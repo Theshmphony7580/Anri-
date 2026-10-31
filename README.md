@@ -7,8 +7,7 @@
   <p>
     <a href="#installation--setup">Get started</a> ·
     <a href="#system-architecture">Architecture</a> ·
-    <a href="#rest-api-reference">API reference</a> ·
-    <a href="docs/local-model-service.md">Remote models</a>
+    <a href="#rest-api-reference">API reference</a>
   </p>
 </div>
 
@@ -28,7 +27,7 @@ ANRI is a self-correcting Retrieval-Augmented Generation system built with **Lan
 ## Key Features
 
 - **Self-correcting retrieval:** Intent routing, context grading, and up to two query rewrites before a grounded answer or refusal.
-- **Two-stage search:** Dense retrieval selects 15 candidates by default; FlashRank reranks them to the top 4. Local and remote model execution are supported.
+- **Two-stage search:** Dense retrieval selects 15 candidates by default; FlashRank reranks them to the top 5. Local model execution is supported.
 - **Document ingestion:** Docling extracts structured text and chunks; optional Gemini Vision captions figures. SHA-256 checks skip duplicate documents.
 - **Flexible storage:** Use local Qdrant storage or a remote Qdrant server, including Qdrant Cloud.
 - **Execution visibility:** Inspect node timings, chunk metadata, retrieval scores, and streamed answer tokens in the dashboard. Startup warmup reduces model loading during queries.
@@ -59,7 +58,7 @@ flowchart TD
     Input([User question]) --> Triage["Triage node<br/>Classify intent"]
     Triage -->|Direct conversation| Direct["Direct generate node"]
     Triage -->|Document research| Retrieve["Retrieve node<br/>Dense Qdrant search · top 15"]
-    Retrieve --> Rerank["Rerank node<br/>FlashRank by default · top 4"]
+    Retrieve --> Rerank["Rerank node<br/>FlashRank by default · top 5"]
     Rerank --> Grade["Grade node<br/>LLM context relevance score"]
     Grade --> Gate{"Score meets threshold?<br/>Default: 0.70"}
     Gate -->|Yes| Generate["Generate node<br/>Answer with source citations"]
@@ -132,7 +131,6 @@ anri/
 └── src/
     ├── config.py                      # Pydantic Settings loader with hardware thread bounds
     ├── schemas.py                     # DocumentChunk, QueryRequest, QueryResponse contracts
-    ├── model_service.py               # Authenticated local embedding/reranking HTTP service
     ├── agent/
     │   ├── graph.py                   # LangGraph StateGraph assembly and compilation
     │   ├── llm.py                     # REST-based inference client (Groq / Gemini)
@@ -256,7 +254,7 @@ QDRANT_COLLECTION_NAME=knowledge_chunks
 
 # RAG Reasoning Bounds
 CONFIDENCE_THRESHOLD=0.70
-RETRIEVAL_TOP_K=4
+RETRIEVAL_TOP_K=5
 ```
 
 ## Running the Application
@@ -273,11 +271,7 @@ python main.py
 The server will initialize, pre-warm embedding and reranker weights into RAM/VRAM via the FastAPI `lifespan` handler, and mount the dashboard at:
 **[Open the dashboard](http://127.0.0.1:8000)**
 
-### 2. Run models on a separate computer
-
-ANRI can send embedding and reranking requests to a local model service over an authenticated HTTPS tunnel. See the [local model service guide](docs/local-model-service.md) for setup and configuration. Keep the embedding model and vector dimension identical to the ones used for the existing Qdrant collection.
-
-### 3. Ingest documents
+### 2. Ingest documents
 
 - **Via the Web Console**: Drag and drop any `.pdf`, `.md`, or `.txt` file into the upload zone on the dashboard. Ingestion progress, chunk count, and SHA-256 hash will be displayed in real time.
 - **Via Python API**:
@@ -289,7 +283,7 @@ ANRI can send embedding and reranking requests to a local model service over an 
   print(f"Status: {result.status} | Chunks: {result.chunk_count}")
   ```
 
-### 4. Query the agent
+### 3. Query the agent
 
 - **Via the Web Console**: Enter questions in the command input box. Watch the circuit flow light up dynamically as nodes execute. Click any chunk to open the metadata inspection drawer.
 - **Via Python API**:
@@ -317,14 +311,11 @@ ANRI can send embedding and reranking requests to a local model service over an 
 | `LOCAL_EMBEDDING_MODEL`| string | `"BAAI/bge-small-en-v1.5"`| Hugging Face model identifier for dense embedding. |
 | `EMBEDDING_DIM` | int | `384` | Dimensionality of embedding vectors (384 for bge-small). |
 | `EMBEDDING_DEVICE` | string | `"cuda"` | Execution target for embeddings (`"cuda"` or `"cpu"`). |
-| `MODEL_SERVICE_URL` | string | empty | Optional HTTPS base URL for a separate ANRI local-model service. When set, ANRI sends embeddings and reranking to that service. |
-| `MODEL_SERVICE_API_KEY` | string | `None` | Bearer token shared with the local model service. Keep it in the host's secret environment settings. |
-| `MODEL_SERVICE_TIMEOUT_SECONDS` | float | `120.0` | Timeout for remote embedding and reranking calls. |
 | `USE_RERANKER` | bool | `true` | Enables/disables the second-stage Cross-Encoder reranker. |
 | `RERANKER_PROVIDER` | string | `"flashrank"` | Reranker engine (`"flashrank"` or `"sentence-transformers"`). |
 | `RERANKER_MODEL` | string | `"ms-marco-MiniLM-L-12-v2"`| Model identifier for cross-encoder reranking. |
 | `RERANK_CANDIDATES_K` | int | `15` | Number of candidate chunks retrieved from vector store. |
-| `RETRIEVAL_TOP_K` | int | `4` | Number of top reranked chunks passed to generator node. |
+| `RETRIEVAL_TOP_K` | int | `5` | Number of top reranked chunks passed to generator node. |
 | `CONFIDENCE_THRESHOLD`| float | `0.70` | Minimum relevance score required to bypass query rewriter. |
 | `QDRANT_URL` | string | empty | Remote Qdrant URL; when set, remote storage is used instead of the local path. |
 | `QDRANT_API_KEY` | string | `None` | Authentication key for a remote Qdrant server or Cloud cluster. |
@@ -435,7 +426,6 @@ The project README declares **Apache-2.0** licensing. A `LICENSE` file is not cu
 <div align="center">
   <p><strong>ANRI</strong> · Enterprise Document RAG Agent</p>
   <p>
-    <a href="docs/local-model-service.md">Model service guide</a> ·
     <a href="QDRANT_CLOUD_MIGRATION_GUIDE.md">Qdrant Cloud guide</a> ·
     <a href="https://github.com/Theshmphony7580/Anri-/issues">Report an issue</a> ·
     <a href="#top">Back to top ↑</a>
