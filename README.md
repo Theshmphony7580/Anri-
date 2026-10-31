@@ -7,8 +7,7 @@
   <p>
     <a href="#installation--setup">Get started</a> ·
     <a href="#system-architecture">Architecture</a> ·
-    <a href="#rest-api-reference">API reference</a> ·
-    <a href="docs/local-model-service.md">Remote models</a>
+    <a href="#rest-api-reference">API reference</a>
   </p>
 </div>
 
@@ -132,7 +131,6 @@ anri/
 └── src/
     ├── config.py                      # Pydantic Settings loader with hardware thread bounds
     ├── schemas.py                     # DocumentChunk, QueryRequest, QueryResponse contracts
-    ├── model_service.py               # Authenticated local embedding/reranking HTTP service
     ├── agent/
     │   ├── graph.py                   # LangGraph StateGraph assembly and compilation
     │   ├── llm.py                     # REST-based inference client (Groq / Gemini)
@@ -273,11 +271,7 @@ python main.py
 The server will initialize, pre-warm embedding and reranker weights into RAM/VRAM via the FastAPI `lifespan` handler, and mount the dashboard at:
 **[Open the dashboard](http://127.0.0.1:8000)**
 
-### 2. Run models on a separate computer
-
-ANRI can send embedding and reranking requests to a local model service over an authenticated HTTPS tunnel. See the [local model service guide](docs/local-model-service.md) for setup and configuration. Keep the embedding model and vector dimension identical to the ones used for the existing Qdrant collection.
-
-### 3. Ingest documents
+### 2. Ingest documents
 
 - **Via the Web Console**: Drag and drop any `.pdf`, `.md`, or `.txt` file into the upload zone on the dashboard. Ingestion progress, chunk count, and SHA-256 hash will be displayed in real time.
 - **Via Python API**:
@@ -289,7 +283,7 @@ ANRI can send embedding and reranking requests to a local model service over an 
   print(f"Status: {result.status} | Chunks: {result.chunk_count}")
   ```
 
-### 4. Query the agent
+### 3. Query the agent
 
 - **Via the Web Console**: Enter questions in the command input box. Watch the circuit flow light up dynamically as nodes execute. Click any chunk to open the metadata inspection drawer.
 - **Via Python API**:
@@ -317,9 +311,6 @@ ANRI can send embedding and reranking requests to a local model service over an 
 | `LOCAL_EMBEDDING_MODEL`| string | `"BAAI/bge-small-en-v1.5"`| Hugging Face model identifier for dense embedding. |
 | `EMBEDDING_DIM` | int | `384` | Dimensionality of embedding vectors (384 for bge-small). |
 | `EMBEDDING_DEVICE` | string | `"cuda"` | Execution target for embeddings (`"cuda"` or `"cpu"`). |
-| `MODEL_SERVICE_URL` | string | empty | Optional HTTPS base URL for a separate ANRI local-model service. When set, ANRI sends embeddings and reranking to that service. |
-| `MODEL_SERVICE_API_KEY` | string | `None` | Bearer token shared with the local model service. Keep it in the host's secret environment settings. |
-| `MODEL_SERVICE_TIMEOUT_SECONDS` | float | `120.0` | Timeout for remote embedding and reranking calls. |
 | `USE_RERANKER` | bool | `true` | Enables/disables the second-stage Cross-Encoder reranker. |
 | `RERANKER_PROVIDER` | string | `"flashrank"` | Reranker engine (`"flashrank"` or `"sentence-transformers"`). |
 | `RERANKER_MODEL` | string | `"ms-marco-MiniLM-L-12-v2"`| Model identifier for cross-encoder reranking. |
@@ -435,7 +426,6 @@ The project README declares **Apache-2.0** licensing. A `LICENSE` file is not cu
 <div align="center">
   <p><strong>ANRI</strong> · Enterprise Document RAG Agent</p>
   <p>
-    <a href="docs/local-model-service.md">Model service guide</a> ·
     <a href="QDRANT_CLOUD_MIGRATION_GUIDE.md">Qdrant Cloud guide</a> ·
     <a href="https://github.com/Theshmphony7580/Anri-/issues">Report an issue</a> ·
     <a href="#top">Back to top ↑</a>
