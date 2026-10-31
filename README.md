@@ -27,7 +27,7 @@ ANRI is a self-correcting Retrieval-Augmented Generation system built with **Lan
 ## Key Features
 
 - **Self-correcting retrieval:** Intent routing, context grading, and up to two query rewrites before a grounded answer or refusal.
-- **Two-stage search:** Dense retrieval selects 15 candidates by default; FlashRank reranks them to the top 4. Local and remote model execution are supported.
+- **Two-stage search:** Dense retrieval selects 15 candidates by default; FlashRank reranks them to the top 5. Local model execution is supported.
 - **Document ingestion:** Docling extracts structured text and chunks; optional Gemini Vision captions figures. SHA-256 checks skip duplicate documents.
 - **Flexible storage:** Use local Qdrant storage or a remote Qdrant server, including Qdrant Cloud.
 - **Execution visibility:** Inspect node timings, chunk metadata, retrieval scores, and streamed answer tokens in the dashboard. Startup warmup reduces model loading during queries.
@@ -58,7 +58,7 @@ flowchart TD
     Input([User question]) --> Triage["Triage node<br/>Classify intent"]
     Triage -->|Direct conversation| Direct["Direct generate node"]
     Triage -->|Document research| Retrieve["Retrieve node<br/>Dense Qdrant search · top 15"]
-    Retrieve --> Rerank["Rerank node<br/>FlashRank by default · top 4"]
+    Retrieve --> Rerank["Rerank node<br/>FlashRank by default · top 5"]
     Rerank --> Grade["Grade node<br/>LLM context relevance score"]
     Grade --> Gate{"Score meets threshold?<br/>Default: 0.70"}
     Gate -->|Yes| Generate["Generate node<br/>Answer with source citations"]
@@ -254,7 +254,7 @@ QDRANT_COLLECTION_NAME=knowledge_chunks
 
 # RAG Reasoning Bounds
 CONFIDENCE_THRESHOLD=0.70
-RETRIEVAL_TOP_K=4
+RETRIEVAL_TOP_K=5
 ```
 
 ## Running the Application
@@ -315,7 +315,7 @@ The server will initialize, pre-warm embedding and reranker weights into RAM/VRA
 | `RERANKER_PROVIDER` | string | `"flashrank"` | Reranker engine (`"flashrank"` or `"sentence-transformers"`). |
 | `RERANKER_MODEL` | string | `"ms-marco-MiniLM-L-12-v2"`| Model identifier for cross-encoder reranking. |
 | `RERANK_CANDIDATES_K` | int | `15` | Number of candidate chunks retrieved from vector store. |
-| `RETRIEVAL_TOP_K` | int | `4` | Number of top reranked chunks passed to generator node. |
+| `RETRIEVAL_TOP_K` | int | `5` | Number of top reranked chunks passed to generator node. |
 | `CONFIDENCE_THRESHOLD`| float | `0.70` | Minimum relevance score required to bypass query rewriter. |
 | `QDRANT_URL` | string | empty | Remote Qdrant URL; when set, remote storage is used instead of the local path. |
 | `QDRANT_API_KEY` | string | `None` | Authentication key for a remote Qdrant server or Cloud cluster. |

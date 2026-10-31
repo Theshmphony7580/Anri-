@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     FORCE_BACKEND_TEXT: bool = True
     GENERATE_PICTURE_IMAGES: bool = False
     CONFIDENCE_THRESHOLD: float = 0.70
-    RETRIEVAL_TOP_K: int = 4
+    RETRIEVAL_TOP_K: int = 5
     ALLOW_MOCK_FALLBACK: bool = False
 
     model_config = SettingsConfigDict(
